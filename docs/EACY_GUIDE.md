@@ -748,23 +748,24 @@ string_free(&s);
 
 ## CLI Arguments
 
-No-dependency `argc`/`argv` parser.
+No-dependency `argc`/`argv` parser. State is held in a struct — no hidden
+globals, safe to pass across translation units.
 
 ```c
 int main(int argc, char **argv) {
-    ec_args_init(argc, argv);
+    ec_args args = ec_args_new(argc, argv);
 
-    if (ec_args_has("--help") || ec_args_has("-h")) {
+    if (ec_args_has(&args, "--help") || ec_args_has(&args, "-h")) {
         println("Usage: mytool [--verbose] [--output FILE] <files...>");
         return 0;
     }
 
-    bool verbose       = ec_args_has("--verbose") || ec_args_has("-v");
-    const char *output = ec_args_val("--output");
-    if (!output) output = ec_args_val("-o");
+    bool verbose       = ec_args_has(&args, "--verbose") || ec_args_has(&args, "-v");
+    const char *output = ec_args_val(&args, "--output");
+    if (!output) output = ec_args_val(&args, "-o");
 
-    for (int i = 0; i < ec_args_pos_count(); i++)
-        print("  arg:", ec_args_pos(i));
+    for (int i = 0; i < ec_args_pos_count(&args); i++)
+        print("  arg:", ec_args_pos(&args, i));
 
     return 0;
 }
@@ -774,15 +775,14 @@ int main(int argc, char **argv) {
 
 | Function | What it does |
 |---|---|
-| `ec_args_init(argc, argv)` | Capture args (call once) |
-| `ec_args_has("--flag")` | `true` if flag is present |
-| `ec_args_val("--key")` | Value after flag, or `NULL` |
-| `ec_args_pos(i)` | i-th positional arg (0-indexed) |
-| `ec_args_pos_count()` | Number of positional args |
-| `ec_args_count()` | Raw `argc` |
+| `ec_args args = ec_args_new(argc, argv)` | Capture args (call once) |
+| `ec_args_has(&args, "--flag")` | `true` if flag is present |
+| `ec_args_val(&args, "--key")` | Value after flag, or `NULL` |
+| `ec_args_pos(&args, i)` | i-th argument after program name (0-indexed) |
+| `ec_args_pos_count(&args)` | Total argument count excluding argv[0] |
+| `ec_args_count(&args)` | Raw `argc` |
 
 No allocations, no copies — pointers into original `argv`.
-
 
 ## Logging
 
@@ -933,8 +933,8 @@ int main(void) {
 #include "eacy.h"
 
 int main(int argc, char **argv) {
-    ec_args_init(argc, argv);
-    const char *path = ec_args_pos(0);
+    ec_args args = ec_args_new(argc, argv);
+    const char *path = ec_args_pos(&args, 0);
     if (!path) { println("Usage: wc <file>"); return 1; }
 
     char *text = read_text_file(path);
@@ -990,8 +990,8 @@ int main(void) {
 #include "eacy.h"
 
 int main(int argc, char **argv) {
-    ec_args_init(argc, argv);
-    const char *path = ec_args_pos(0);
+    ec_args args = ec_args_new(argc, argv);
+    const char *path = ec_args_pos(&args, 0);
     if (!path) { println("Usage: topk <file>"); return 1; }
 
     char *text = read_text_file(path);
@@ -1046,7 +1046,7 @@ program: `print`, `scan`, `da_push`, `string_append`, `random_int`,
 
 **Advanced or infrequent features — `ec_` prefix.** These signal "this does
 something non-trivial": `ec_arena_new`, `ec_hm_set`, `ec_pool_alloc`,
-`ec_malloc`, `ec_init_colors`, `ec_args_init`.
+`ec_malloc`, `ec_init_colors`, `ec_args_new`.
 
 Types for advanced features also carry the `ec_` prefix (`ec_hashmap`,
 `ec_string`, `ec_arena`, `ec_pool`, `ec_timer`) even when their everyday

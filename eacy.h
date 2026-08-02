@@ -41,10 +41,6 @@
     #define _POSIX_C_SOURCE 200809L
 #endif
 
-#if defined(__cplusplus)
-extern "C" {
-#define restrict
-#endif
 
 /* ---------------------------------------------------------------------------
  * Standard headers
@@ -474,6 +470,7 @@ EC_INLINE float random_float(float min, float max) {
  * starts_with(str, prefix) — returns true if `str` begins with `prefix`.
  */
 EC_INLINE bool starts_with(const char *restrict str, const char *restrict prefix) {
+    if (!str || !prefix) return false;
     size_t prefix_len = strlen(prefix);
     return strncmp(str, prefix, prefix_len) == 0;
 }
@@ -482,6 +479,7 @@ EC_INLINE bool starts_with(const char *restrict str, const char *restrict prefix
  * ends_with(str, suffix) — returns true if `str` ends with `suffix`.
  */
 EC_INLINE bool ends_with(const char *restrict str, const char *restrict suffix) {
+    if (!str || !suffix) return false;
     size_t str_len = strlen(str);
     size_t suffix_len = strlen(suffix);
     if (suffix_len > str_len) return false;
@@ -492,7 +490,8 @@ EC_INLINE bool ends_with(const char *restrict str, const char *restrict suffix) 
  * inside `str`.
  */
 EC_INLINE bool contains(const char *restrict str, const char *restrict needle) {
-    if (!*needle) return true;
+    if (!needle || !*needle) return needle ? true : false;
+    if (!str) return false;
     return strstr(str, needle) != NULL;
 }
 
@@ -839,7 +838,7 @@ typedef struct {
 
 /**
  * da_back(arr) — returns the last element.  Undefined if the array is
- * empty.
+ * empty — callers should guard with da_len(arr) > 0.
  */
 #define da_back(arr)     ((arr)[ec_da_hdr_(arr)->len - 1])
 
@@ -857,12 +856,12 @@ typedef struct {
  * Safe to call on an already-NULL array (no-op).
  */
 #define da_free(arr) do { \
-    if (arr) { free(ec_da_hdr_(arr)); (arr) = NULL; } \
+    if (arr) { ec_free(ec_da_hdr_(arr)); (arr) = NULL; } \
 } while (0)
 
 /**
  * da_pop(arr) — removes and returns the last element.  Undefined if the
- * array is empty.
+ * array is empty — callers should guard with da_len(arr) > 0.
  */
 #define da_pop(arr)      ((arr)[--ec_da_hdr_(arr)->len])
 
@@ -1019,16 +1018,21 @@ EC_INLINE int ec_cmp_long(const void *a, const void *b) {
     long la = *(const long *)a, lb = *(const long *)b;
     return (la > lb) - (la < lb);
 }
-EC_INLINE int ec_cmp_long_desc(const void *a, const void *b)  { return ec_cmp_long(b, a); }
-
 EC_INLINE int ec_cmp_float(const void *a, const void *b) {
     float fa = *(const float *)a, fb = *(const float *)b;
+    if (fa != fa || fb != fb) {
+        /* At least one is NaN: push NaN to the end (treat as > all). */
+        return (fa != fa) ? ((fb != fb) ? 0 : 1) : -1;
+    }
     return (fa > fb) - (fa < fb);
 }
 EC_INLINE int ec_cmp_float_desc(const void *a, const void *b) { return ec_cmp_float(b, a); }
 
 EC_INLINE int ec_cmp_double(const void *a, const void *b) {
     double da = *(const double *)a, db = *(const double *)b;
+    if (da != da || db != db) {
+        return (da != da) ? ((db != db) ? 0 : 1) : -1;
+    }
     return (da > db) - (da < db);
 }
 EC_INLINE int ec_cmp_double_desc(const void *a, const void *b){ return ec_cmp_double(b, a); }
@@ -1170,9 +1174,9 @@ EC_INLINE size_t ec_arena_remaining(const ec_arena *a) {
  * Section 14: Simple CLI argument parsing
  * =========================================================================
  *
- * A no-dependency argument parser for command-line tools.  Call
- * ec_args_init(argc, argv) once at the top of main(), then use the
- * query functions.  Supports:
+ * A no-dependency argument parser for command-line tools.  Create an
+ * ec_args struct once at the top of main() with ec_args_new(argc, argv),
+ * then pass a pointer to it for every query.  Supports:
  *   - Flags: --verbose, -v, /verbose (detected as present/absent)
  *   - Key-value: --output out.txt, -o out.txt (value follows the flag)
  *   - Positional: everything that isn't a recognised flag/value pair
@@ -1181,84 +1185,83 @@ EC_INLINE size_t ec_arena_remaining(const ec_arena *a) {
  *
  * Example:
  *     int main(int argc, char **argv) {
- *         ec_args_init(argc, argv);
- *         if (ec_args_has("--help"))   { print_usage(); return 0; }
- *         bool verbose = ec_args_has("--verbose") || ec_args_has("-v");
- *         const char *out = ec_args_val("--output");  // NULL if absent
- *         for (int i = 0; i < ec_args_pos_count(); i++)
- *             println("  positional:", ec_args_pos(i));
+ *         ec_args args = ec_args_new(argc, argv);
+ *         if (ec_args_has(&args, "--help"))   { print_usage(); return 0; }
+ *         bool verbose = ec_args_has(&args, "--verbose") || ec_args_has(&args, "-v");
+ *         const char *out = ec_args_val(&args, "--output");  // NULL if absent
+ *         for (int i = 0; i < ec_args_pos_count(&args); i++)
+ *             println("  positional:", ec_args_pos(&args, i));
  *     }
  */
 
-/* Internal state — set by ec_args_init(), read by the helpers. */
-static int    ec_args_argc_ = 0;
-static char **ec_args_argv_ = NULL;
+typedef struct {
+    int    argc;
+    char **argv;
+} ec_args;
 
 /**
- * ec_args_init(argc, argv) — captures argc/argv so the query functions
- * below can inspect them.  Call exactly once, at the top of main().
+ * ec_args_new(argc, argv) — captures argc/argv for the query functions
+ * below.  Call exactly once, at the top of main().  The returned struct
+ * is safe to pass across translation units (no hidden static state).
  */
-#define ec_args_init(argc, argv) do { \
-    ec_args_argc_ = (argc); ec_args_argv_ = (argv); \
-} while (0)
+EC_INLINE ec_args ec_args_new(int argc, char **argv) {
+    ec_args a = {argc, argv};
+    return a;
+}
 
 /**
- * ec_args_has(flag) — returns true if `flag` appears anywhere in the
- * argument list.  `flag` should include leading dashes (e.g. "--help",
- * "-v").  The match is an exact string comparison.
+ * ec_args_has(args, flag) — returns true if `flag` appears anywhere in
+ * the argument list.  `flag` should include leading dashes (e.g.
+ * "--help", "-v").  The match is an exact string comparison.
  */
-EC_INLINE bool ec_args_has(const char *flag) {
-    for (int i = 1; i < ec_args_argc_; i++) {
-        if (ec_args_argv_[i] && strcmp(ec_args_argv_[i], flag) == 0)
+EC_INLINE bool ec_args_has(const ec_args *a, const char *flag) {
+    for (int i = 1; i < a->argc; i++) {
+        if (a->argv[i] && strcmp(a->argv[i], flag) == 0)
             return true;
     }
     return false;
 }
 
 /**
- * ec_args_val(flag) — returns the string immediately following `flag`
- * in argv, or NULL if the flag is absent or is the last argument.
- * Useful for "--output out.txt" or "-o out.txt".
+ * ec_args_val(args, flag) — returns the string immediately following
+ * `flag` in argv, or NULL if the flag is absent or is the last
+ * argument.  Useful for "--output out.txt" or "-o out.txt".
  */
-EC_INLINE const char *ec_args_val(const char *flag) {
-    for (int i = 1; i < ec_args_argc_ - 1; i++) {
-        if (ec_args_argv_[i] && strcmp(ec_args_argv_[i], flag) == 0)
-            return ec_args_argv_[i + 1];
+EC_INLINE const char *ec_args_val(const ec_args *a, const char *flag) {
+    for (int i = 1; i < a->argc - 1; i++) {
+        if (a->argv[i] && strcmp(a->argv[i], flag) == 0)
+            return a->argv[i + 1];
     }
     return NULL;
 }
 
 /**
- * ec_args_pos_count() — returns the number of positional arguments
- * (everything that is not a recognised flag or the value immediately
- * following a known flag).  Call this AFTER querying all flags with
- * ec_args_has() / ec_args_val(), because positional detection depends
- * on which flags the program considers "known".
+ * ec_args_pos_count(args) — returns the number of arguments excluding
+ * argv[0] (the program name).  All arguments — flags, flag values, and
+ * positional — are counted.  This is a simple arg count; if you need to
+ * distinguish positional from flags, filter argv manually.
  */
-EC_INLINE int ec_args_pos_count(void) {
-    /* We return the raw count of non-flag argv entries.
-     * This is a simplified model: argv[0] is the program name
-     * and is always skipped.  Everything else is positional unless
-     * filtered by the caller. */
-    return ec_args_argc_ > 0 ? ec_args_argc_ - 1 : 0;
+EC_INLINE int ec_args_pos_count(const ec_args *a) {
+    return a->argc > 0 ? a->argc - 1 : 0;
 }
 
 /**
- * ec_args_pos(i) — returns the i-th positional argument (0-indexed,
- * skipping argv[0]).  Returns NULL if i is out of range.
+ * ec_args_pos(args, i) — returns the i-th argument after the program
+ * name (0-indexed: i=0 gives argv[1]), or NULL if i is out of range.
+ * All arguments — flags included — are accessible via this function.
  */
-EC_INLINE const char *ec_args_pos(int i) {
+EC_INLINE const char *ec_args_pos(const ec_args *a, int i) {
     int idx = i + 1;  /* skip argv[0] */
-    if (idx < 0 || idx >= ec_args_argc_) return NULL;
-    return ec_args_argv_[idx];
+    if (idx < 0 || idx >= a->argc) return NULL;
+    return a->argv[idx];
 }
 
 /**
- * ec_args_count() — returns the raw argument count (equivalent to
+ * ec_args_count(args) — returns the raw argument count (equivalent to
  * argc).  Rarely needed; provided for completeness.
  */
-EC_INLINE int ec_args_count(void) {
-    return ec_args_argc_;
+EC_INLINE int ec_args_count(const ec_args *a) {
+    return a->argc;
 }
 
 /* ===========================================================================
@@ -1273,27 +1276,33 @@ EC_INLINE int ec_args_count(void) {
  * capacity for fast bitmask indexing.  Tombstone entries keep the
  * probing chain intact after removals.
  *
- * String keys (char*) are detected automatically: when the key type is
- * char*, comparison and hashing use the string *content* (strcmp /
- * FNV-1a over the string), not the pointer address.  The caller must
- * ensure that string keys remain valid for the lifetime of the entry.
+ * String keys (char*) are detected automatically via _Generic: string
+ * literals, char* variables, and const char* variables all work as
+ * string keys — no casts needed.  Comparison and hashing use the string
+ * *content* (strcmp / FNV-1a over the string), not the pointer address.
+ * The caller must ensure that string keys remain valid for the lifetime
+ * of the entry.
  *
  * Example (int → int):
  *     hm(int, int) scores;
  *     hm_init(scores);
- *     hm_set(scores, 42, 100);
- *     hm_set(scores, 7, 200);
+ *     int k1 = 42, v1 = 100, k2 = 7, v2 = 200;
+ *     hm_set(scores, k1, v1);
+ *     hm_set(scores, k2, v2);
  *     int val;
- *     if (hm_get(scores, 42, &val)) println("score:", val);  // 100
+ *     int key = 42;
+ *     if (hm_get(scores, key, &val)) println("score:", val);  // 100
  *     hm_free(scores);
  *
  * Example (string → float):
  *     hm(char*, float) prices;
  *     hm_init(prices);
- *     hm_set(prices, "apple", 1.29f);
- *     hm_set(prices, "bread", 3.49f);
+ *     const char *apple = "apple", *bread = "bread";
+ *     hm_set(prices, apple, 1.29f);
+ *     hm_set(prices, bread, 3.49f);
  *     float price;
- *     if (hm_get(prices, "apple", &price)) println("price:", price);
+ *     const char *lookup = "apple";
+ *     if (hm_get(prices, lookup, &price)) println("price:", price);
  *     hm_free(prices);
  *
  * HEAP ALLOCATION: hm_init() does not allocate; the slot table is
@@ -1436,6 +1445,34 @@ EC_INLINE bool ec_hm_grow_if_needed_(ec_hashmap *m) {
 
 /* ---- Public typed macros ----------------------------------------------- */
 
+#define EC_HM_VAL_PTR_(x)  ((const void *)&(x))
+/* Internal: core insertion logic shared by hm_set. */
+EC_INLINE void ec_hm_set_impl_(ec_hashmap *m,
+                                const void *key, const void *val) {
+    uint64_t h  = ec_hm_hash_key_(m, key);
+    size_t   idx = (size_t)(h & (m->cap - 1));
+    size_t   tomb = (size_t)-1;
+    for (;;) {
+        uint8_t st = *ec_hm_state_(m, idx);
+        if (st == 0) {
+            size_t ins = (tomb != (size_t)-1) ? tomb : idx;
+            memcpy(ec_hm_key_(m, ins), key, m->key_size);
+            memcpy(ec_hm_val_(m, ins), val, m->val_size);
+            *ec_hm_state_(m, ins) = 1;
+            m->len++;
+            if (tomb == (size_t)-1) m->used++;
+            return;
+        }
+        if (st == 2) {
+            if (tomb == (size_t)-1) tomb = idx;
+        } else if (ec_hm_key_eq_(m, ec_hm_key_(m, idx), key)) {
+            memcpy(ec_hm_val_(m, idx), val, m->val_size);
+            return;
+        }
+        idx = (idx + 1) & (m->cap - 1);
+    }
+}
+
 /**
  * hm(K, V) — declares a hash map variable with the given key and value
  * types.  Expands to `ec_hashmap`; the types are captured by the other
@@ -1454,14 +1491,16 @@ EC_INLINE bool ec_hm_grow_if_needed_(ec_hashmap *m) {
  * value are copied into the map (shallow memcpy).  On allocation failure
  * the map is unchanged (the item is silently dropped).
  *
- * On the first call, key and value sizes are captured from the arguments
- * and stored in the map.  Subsequent calls MUST use the same types.
+ * On the first call, key and value types are detected via _Generic:
+ * char* and const char* are recognised as string keys (compared by
+ * content via strcmp, hashed via FNV-1a over the string).
+ * All other types are compared/hashed bytewise via memcmp/FNV-1a.
+ * Subsequent calls MUST use the same types.
  *
- * IMPORTANT for string keys: when using hm(char*, V), the key argument
- * MUST be a char* lvalue or an explicit cast to char*.  Passing a
- * string literal directly (e.g. hm_set(m, "key", val)) will treat the
- * literal as a char array (inline bytes), not as a pointer — use a
- * variable or write hm_set(m, (char*)"key", val).
+ * IMPORTANT: `k` and `v` must be lvalues (variables).  Even string
+ * literals must be stored in a variable first:
+ *     const char *apple = "apple";
+ *     hm_set(prices, apple, 1.29f);
  *
  * HEAP ALLOCATION: on first call (or when the map grows), allocates
  * or reallocates the internal slot table.
@@ -1469,36 +1508,17 @@ EC_INLINE bool ec_hm_grow_if_needed_(ec_hashmap *m) {
 #define hm_set(m, k, v) do { \
     ec_hashmap *ec_hm_m_ = &(m); \
     if (ec_hm_m_->key_size == 0) { \
-        ec_hm_m_->key_size = sizeof(k); \
-        ec_hm_m_->val_size = sizeof(v); \
-        ec_hm_m_->str_keys  = (ec_hm_m_->key_size == sizeof(char*)); \
+        ec_hm_m_->key_size = _Generic((k), \
+            char*: sizeof(char*), const char*: sizeof(char*), \
+            default: sizeof(k)); \
+        ec_hm_m_->val_size = _Generic((v), \
+            char*: sizeof(char*), const char*: sizeof(char*), \
+            default: sizeof(v)); \
+        ec_hm_m_->str_keys  = _Generic((k), \
+            char*: true, const char*: true, default: false); \
     } \
     if (!ec_hm_grow_if_needed_(ec_hm_m_)) break; \
-    /* Temporary copies so &k / &v work with rvalues (literals, expressions). */ \
-    __typeof__(k) ec_hm_tmp_k_ = (k); \
-    __typeof__(v) ec_hm_tmp_v_ = (v); \
-    uint64_t ec_hm_h_ = ec_hm_hash_key_(ec_hm_m_, &ec_hm_tmp_k_); \
-    size_t   ec_hm_i_ = (size_t)(ec_hm_h_ & (ec_hm_m_->cap - 1)); \
-    size_t   ec_hm_tomb_ = (size_t)-1; \
-    for (;;) { \
-        uint8_t ec_hm_st_ = *ec_hm_state_(ec_hm_m_, ec_hm_i_); \
-        if (ec_hm_st_ == 0) { \
-            size_t ec_hm_ins_ = (ec_hm_tomb_ != (size_t)-1) ? ec_hm_tomb_ : ec_hm_i_; \
-            memcpy(ec_hm_key_(ec_hm_m_, ec_hm_ins_), &ec_hm_tmp_k_, ec_hm_m_->key_size); \
-            memcpy(ec_hm_val_(ec_hm_m_, ec_hm_ins_), &ec_hm_tmp_v_, ec_hm_m_->val_size); \
-            *ec_hm_state_(ec_hm_m_, ec_hm_ins_) = 1; \
-            ec_hm_m_->len++; \
-            if (ec_hm_tomb_ == (size_t)-1) ec_hm_m_->used++; \
-            break; \
-        } \
-        if (ec_hm_st_ == 2) { \
-            if (ec_hm_tomb_ == (size_t)-1) ec_hm_tomb_ = ec_hm_i_; \
-        } else if (ec_hm_key_eq_(ec_hm_m_, ec_hm_key_(ec_hm_m_, ec_hm_i_), &ec_hm_tmp_k_)) { \
-            memcpy(ec_hm_val_(ec_hm_m_, ec_hm_i_), &ec_hm_tmp_v_, ec_hm_m_->val_size); \
-            break; \
-        } \
-        ec_hm_i_ = (ec_hm_i_ + 1) & (ec_hm_m_->cap - 1); \
-    } \
+    ec_hm_set_impl_(ec_hm_m_, EC_HM_VAL_PTR_(k), EC_HM_VAL_PTR_(v)); \
 } while (0)
 
 /**
@@ -1506,17 +1526,18 @@ EC_INLINE bool ec_hm_grow_if_needed_(ec_hashmap *m) {
  * value into `*v`.  `v` must be a pointer to a variable of the correct
  * value type.  Returns true if the key was found.
  *
+ * IMPORTANT: `k` must be an lvalue (a named variable).  For string-keyed
+ * maps, use a const char* variable for the lookup key:
+ *     const char *key = "apple";
+ *     hm_get(prices, key, &price);
+ *
  * Example:
  *     int val;
- *     if (hm_get(scores, 42, &val)) println("Found:", val);
+ *     int key = 42;
+ *     if (hm_get(scores, key, &val)) println("Found:", val);
  */
 #define hm_get(m, k, v) \
-    ec_hm_get_impl_(&(m), &(k), (void *)(v))
-/**
- * NOTE: `k` must be an lvalue (a named variable).  Passing a literal
- * (e.g. hm_get(m, 42, &v)) is not supported — assign to a variable
- * first: int key = 42; hm_get(m, key, &v).
- */
+    ec_hm_get_impl_(&(m), EC_HM_VAL_PTR_(k), (void *)(v))
 
 EC_INLINE bool ec_hm_get_impl_(const ec_hashmap *m,
                                const void *key, void *val_out) {
@@ -1534,7 +1555,7 @@ EC_INLINE bool ec_hm_get_impl_(const ec_hashmap *m,
     }
 }
 #define hm_contains(m, k) \
-    ec_hm_contains_impl_(&(m), &(k))
+    ec_hm_contains_impl_(&(m), EC_HM_VAL_PTR_(k))
 
 EC_INLINE bool ec_hm_contains_impl_(const ec_hashmap *m, const void *key) {
     return ec_hm_get_impl_(m, key, NULL);
@@ -1546,7 +1567,7 @@ EC_INLINE bool ec_hm_contains_impl_(const ec_hashmap *m, const void *key) {
  * preserved.
  */
 #define hm_remove(m, k) \
-    ec_hm_remove_impl_(&(m), &(k))
+    ec_hm_remove_impl_(&(m), EC_HM_VAL_PTR_(k))
 
 EC_INLINE bool ec_hm_remove_impl_(ec_hashmap *m, const void *key) {
     if (!m->slots || m->len == 0 || m->key_size == 0) return false;
@@ -2031,24 +2052,19 @@ EC_INLINE void string_appendf(ec_string *s, const char *fmt, ...) {
  *     println(msg.data);
  *     string_free(&msg);
  */
-EC_INLINE ec_string string_fromf(const char *fmt, ...) {
-    ec_string s = string_new();
-    va_list args;
-    va_start(args, fmt);
-    int n = vsnprintf(NULL, 0, fmt, args);
-    va_end(args);
-    if (n <= 0) return s;
-
-    s.cap  = (size_t)n + 1;
-    s.data = (char *)malloc(s.cap);
-    if (!s.data) { s.cap = 0; return s; }
-
-    va_start(args, fmt);
-    vsnprintf(s.data, s.cap, fmt, args);
-    va_end(args);
-    s.len = (size_t)n;
-    return s;
-}
+/**
+ * string_fromf(fmt, ...) — alias for string_printf().  Provided for
+ * backward compatibility and as a more descriptive name for one-shot
+ * formatted string creation.
+ *
+ * HEAP ALLOCATION: the returned string must be freed with string_free().
+ *
+ * Example:
+ *     ec_string msg = string_fromf("Page %d of %d", 3, 10);
+ *     println(msg.data);
+ *     string_free(&msg);
+ */
+#define string_fromf(...) string_printf(__VA_ARGS__)
 
 /**
  * string_clear(s) — resets the string to empty (length 0) without
@@ -2547,8 +2563,5 @@ EC_INLINE double timer_elapsed_seconds(const ec_timer *t) {
          ec_bm_.total += timer_elapsed_ms(&ec_bm_.t), \
          ec_bm_.i++, \
          ec_bm_.t = timer_start())
-#if defined(__cplusplus)
-} /* extern "C" */
-#endif
 
 #endif /* EACY_H */

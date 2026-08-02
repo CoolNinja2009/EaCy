@@ -24,7 +24,7 @@ void stress_da_hm_together(void) {
     for_range(i, 0, 100) {
         hm(int, int) m;
         hm_init(m);
-        for_range(j, 0, 500) hm_set(m, (int)j, (int)(j * (i + 1)));
+        for_range(j, 0, 500) { int k = (int)j, v = (int)(j * (i + 1)); hm_set(m, k, v); }
         da_push(maps, m);
     }
     CHECK(da_len(maps) == 100, "100 hash maps");
@@ -144,7 +144,7 @@ void stress_edge_cases(void) {
     /* hash map double-free */
     hm(int, int) m;
     hm_init(m);
-    hm_set(m, 1, 10);
+    { int k = 1, v = 10; hm_set(m, k, v); }
     hm_free(m);
     hm_free(m);  /* safe double-free */
     CHECK(hm_empty(m), "double-free safe");

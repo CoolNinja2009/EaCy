@@ -23,7 +23,7 @@ void test_int_int(void) {
     CHECK(hm_size(m) == 0, "size 0");
 
     /* insert 1000 entries */
-    for_range(i, 0, 1000) hm_set(m, (int)i, (int)(i * 10));
+    for_range(i, 0, 1000) { int k = (int)i, v = (int)(i * 10); hm_set(m, k, v); }
     CHECK(hm_size(m) == 1000, "size 1000");
     CHECK(!hm_empty(m), "not empty");
 
@@ -38,7 +38,7 @@ void test_int_int(void) {
     { int k = 9999; CHECK(!hm_contains(m, k), "!contains 9999"); }
 
     /* update */
-    { int k = 500; hm_set(m, k, 99999); }
+    { int k = 500; int val = 99999; hm_set(m, k, val); }
     int v; { int k = 500;
     CHECK(hm_get(m, k, &v) && v == 99999, "update"); }
 
@@ -55,7 +55,7 @@ void test_int_int(void) {
     { int k = 999; CHECK(hm_contains(m, k), "remaining key found"); }
 
     /* re-insert removed key */
-    { int k = 0; hm_set(m, k, 42); }
+    { int k = 0; int val = 42; hm_set(m, k, val); }
     { int k = 0; CHECK(hm_get(m, k, &v) && v == 42, "re-insert"); }
 
     /* clear */
@@ -64,7 +64,7 @@ void test_int_int(void) {
     CHECK(hm_size(m) == 0, "size after clear");
 
     /* reuse after clear */
-    { int k = 1; hm_set(m, k, 100); }
+    { int k = 1; int val = 100; hm_set(m, k, val); }
     { int k = 1; CHECK(hm_get(m, k, &v) && v == 100, "reuse after clear"); }
 }
 
@@ -76,7 +76,7 @@ void test_string_float(void) {
     const char *keys[] = {"alpha", "beta", "gamma", "delta", "epsilon",
                           "zeta", "eta", "theta", "iota", "kappa"};
     for_range(i, 0, 10) {
-        hm_set(m, keys[i], (float)i * 1.5f);
+        float fv = (float)i * 1.5f; hm_set(m, keys[i], fv);
     }
     CHECK(hm_size(m) == 10, "size 10");
 
@@ -153,7 +153,7 @@ void test_stress_50k(void) {
     hm_init(m);
 
     /* insert 50k sequential */
-    for_range(i, 0, 50000) hm_set(m, (int)i, (int)(i ^ 0x5555));
+    for_range(i, 0, 50000) { int k = (int)i, v = (int)(i ^ 0x5555); hm_set(m, k, v); }
     CHECK(hm_size(m) == 50000, "50k size");
 
     /* spot-check */
