@@ -1,0 +1,118 @@
+# ==========================================================
+# EaCy - .gitignore
+# ==========================================================
+
+# Build outputs
+*.o
+*.obj
+*.out
+*.exe
+*.dll
+*.so
+*.dylib
+*.a
+*.lib
+*.exp
+*.pdb
+
+# Debug symbols
+*.dSYM/
+*.idb
+
+# Coverage
+*.gcda
+*.gcno
+*.gcov
+coverage/
+coverage.info
+
+# Profiling
+gmon.out
+*.prof
+
+# CMake
+build/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+compile_commands.json
+cmake_install.cmake
+Makefile
+
+# Make
+*.d
+
+# Ninja
+.ninja_*
+build.ninja
+
+# Visual Studio
+.vs/
+*.VC.db
+*.VC.opendb
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+
+# VS Code
+.vscode/
+
+# CLion
+.idea/
+
+# Xcode
+DerivedData/
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.swp
+*.swo
+*~
+
+# Logs
+*.log
+
+# Test binaries
+tests/*.exe
+tests/*.out
+tests/test_*
+
+# Benchmark binaries
+benchmarks/*.exe
+benchmarks/*.out
+
+# Generated documentation
+docs/html/
+docs/latex/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Memory/debug dumps
+*.core
+core
+*.stackdump
+
+# Archives
+*.zip
+*.tar
+*.tar.gz
+*.7z
+
+# Local environment
+.env
+.env.*
+
+# Keep source code
+!*.c
+!*.h
+!*.cpp
+!*.hpp
+!*.md
+!LICENSE
+!README.md
+!CMakeLists.txt

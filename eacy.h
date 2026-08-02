@@ -43,6 +43,7 @@
 
 #if defined(__cplusplus)
 extern "C" {
+#define restrict
 #endif
 
 /* ---------------------------------------------------------------------------
@@ -517,6 +518,11 @@ EC_INLINE bool equals(const char *restrict a, const char *restrict b) {
  */
 EC_INLINE char *trim(char *restrict str) {
     if (!str) return str;
+    /* Skip leading whitespace. */
+    while (*str && isspace((unsigned char)*str)) str++;
+    /* If we landed on the null terminator, the string is all whitespace. */
+    if (*str == '\0') return str;
+    /* Trim trailing whitespace. */
     char *end = str + strlen(str) - 1;
     while (end > str && isspace((unsigned char)*end)) end--;
     end[1] = '\0';
@@ -1256,34 +1262,84 @@ EC_INLINE int ec_args_count(void) {
 }
 
 /* ===========================================================================
- * Section 15: Hash map  (string -> string, open addressing, FNV-1a)
+ * Section 15: Generic hash map  (open addressing, linear probing, FNV-1a)
  * =========================================================================
  *
- * A fast, zero-dependency string-to-string hash map.  Uses open
- * addressing with linear probing (cache-friendly) and FNV-1a 64-bit
- * hashing.  Capacity is always a power of two so lookups use a bitmask
- * instead of modulo.
+ * A type-safe, macro-driven hash map that works with any key and value
+ * type.  Internally uses a single polymorphic implementation: keys and
+ * values are stored inline via memcpy so the map owns its data.
  *
- * Tombstone entries prevent the "delete breaks probing" problem without
- * full rehashing on every removal.
+ * Open addressing with linear probing, FNV-1a hashing, and power-of-two
+ * capacity for fast bitmask indexing.  Tombstone entries keep the
+ * probing chain intact after removals.
  *
- * Keys and values are copied into the map (internal strdup), so the
- * caller retains ownership of the original strings.  ec_hm_free()
- * releases all internal copies.
+ * String keys (char*) are detected automatically: when the key type is
+ * char*, comparison and hashing use the string *content* (strcmp /
+ * FNV-1a over the string), not the pointer address.  The caller must
+ * ensure that string keys remain valid for the lifetime of the entry.
  *
- * Example:
- *     ec_hashmap m = ec_hm_new();
- *     ec_hm_set(&m, "name",  "Alice");
- *     ec_hm_set(&m, "score", "42");
- *     println(ec_hm_get(&m, "name"));   // Alice
- *     ec_hm_del(&m, "score");
- *     ec_hm_free(&m);
+ * Example (int → int):
+ *     hm(int, int) scores;
+ *     hm_init(scores);
+ *     hm_set(scores, 42, 100);
+ *     hm_set(scores, 7, 200);
+ *     int val;
+ *     if (hm_get(scores, 42, &val)) println("score:", val);  // 100
+ *     hm_free(scores);
+ *
+ * Example (string → float):
+ *     hm(char*, float) prices;
+ *     hm_init(prices);
+ *     hm_set(prices, "apple", 1.29f);
+ *     hm_set(prices, "bread", 3.49f);
+ *     float price;
+ *     if (hm_get(prices, "apple", &price)) println("price:", price);
+ *     hm_free(prices);
+ *
+ * HEAP ALLOCATION: hm_init() does not allocate; the slot table is
+ * allocated on the first hm_set() call.  hm_free() releases all
+ * internal memory.  Each hm_set() copies the key and value into the
+ * map (shallow memcpy — for pointer-typed values, the caller retains
+ * ownership of the pointed-to data).
  */
 
-/* Internal helpers -------------------------------------------------------- */
+/* ---- Internal: polymorphic hash map ------------------------------------ */
 
-/* FNV-1a 64-bit.  Simple, fast, good distribution for short ASCII keys. */
-EC_INLINE uint64_t ec_hm_hash_(const void *data, size_t len) {
+#define EC_HM_INIT_CAP   16
+#define EC_HM_MAX_LOAD    7   /* numerator   */
+#define EC_HM_LOAD_SCALE  10  /* denominator => 70 % max load */
+
+typedef struct {
+    unsigned char *slots;    /* flat array: [key][val][state] per slot */
+    size_t         cap;      /* number of slots (always power of 2) */
+    size_t         len;      /* occupied slots */
+    size_t         used;     /* occupied + tombstones (drives load factor) */
+    size_t         key_size; /* bytes per key   (0 → uninitialised) */
+    size_t         val_size; /* bytes per value (0 → uninitialised) */
+    bool           str_keys; /* true when key_size == sizeof(char*) */
+} ec_hashmap;
+
+/* Total bytes per slot: key + val + 1 state byte. */
+EC_INLINE size_t ec_hm_slot_sz_(const ec_hashmap *m) {
+    return m->key_size + m->val_size + 1;
+}
+
+/* Pointers into a slot. */
+EC_INLINE unsigned char *ec_hm_slot_(const ec_hashmap *m, size_t i) {
+    return m->slots + i * ec_hm_slot_sz_(m);
+}
+EC_INLINE unsigned char *ec_hm_key_(const ec_hashmap *m, size_t i) {
+    return ec_hm_slot_(m, i);
+}
+EC_INLINE unsigned char *ec_hm_val_(const ec_hashmap *m, size_t i) {
+    return ec_hm_slot_(m, i) + m->key_size;
+}
+EC_INLINE uint8_t *ec_hm_state_(const ec_hashmap *m, size_t i) {
+    return (uint8_t *)(ec_hm_val_(m, i) + m->val_size);
+}
+
+/* FNV-1a 64-bit over raw bytes. */
+EC_INLINE uint64_t ec_hm_hash_bytes_(const void *data, size_t len) {
     uint64_t h = 14695981039346656037ULL;
     const unsigned char *p = (const unsigned char *)data;
     for (size_t i = 0; i < len; i++) {
@@ -1293,7 +1349,261 @@ EC_INLINE uint64_t ec_hm_hash_(const void *data, size_t len) {
     return h;
 }
 
-/* Copies `len` bytes + NUL terminator.  Returns NULL on malloc failure. */
+/* Hash and comparison helpers for string keys (char*).  These are kept
+ * separate so that the compiler does not warn about array-bounds when
+ * the same inline functions are called with non-string (e.g. int) keys. */
+#if defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Warray-bounds"
+#endif
+EC_INLINE uint64_t ec_hm_hash_str_(const void *key) {
+    const char *s;
+    memcpy(&s, key, sizeof(s));
+    return ec_hm_hash_bytes_(s, s ? strlen(s) : 0);
+}
+
+EC_INLINE bool ec_hm_key_eq_str_(const unsigned char *slot_key,
+                                  const void *search_key) {
+    const char *sa;  memcpy(&sa, slot_key,   sizeof(sa));
+    const char *sb;  memcpy(&sb, search_key, sizeof(sb));
+    if (!sa || !sb) return sa == sb;
+    return strcmp(sa, sb) == 0;
+}
+#if defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
+
+/* Compute the hash for a key pointer.  For string keys, hash the string
+ * content; otherwise hash the raw key bytes. */
+EC_INLINE uint64_t ec_hm_hash_key_(const ec_hashmap *m, const void *key) {
+    if (m->str_keys) return ec_hm_hash_str_(key);
+    return ec_hm_hash_bytes_(key, m->key_size);
+}
+
+/* Compare two keys.  For string keys, use strcmp; otherwise memcmp. */
+EC_INLINE bool ec_hm_key_eq_(const ec_hashmap *m,
+                             const unsigned char *slot_key,
+                             const void *search_key) {
+    if (m->str_keys) return ec_hm_key_eq_str_(slot_key, search_key);
+    return memcmp(slot_key, search_key, m->key_size) == 0;
+}
+
+/* Internal: resize to new_cap (power of 2).  Rehashes all live entries.
+ * On failure the map is unchanged. */
+EC_INLINE bool ec_hm_resize_(ec_hashmap *m, size_t new_cap) {
+    size_t slot_sz = ec_hm_slot_sz_(m);
+    unsigned char *old_slots = m->slots;
+    size_t         old_cap   = m->cap;
+
+    m->slots = (unsigned char *)calloc(new_cap, slot_sz);
+    if (!m->slots) { m->slots = old_slots; return false; }
+    m->cap  = new_cap;
+    m->len  = 0;
+    m->used = 0;
+
+    for (size_t i = 0; i < old_cap; i++) {
+        uint8_t st = *(uint8_t *)(old_slots + i * slot_sz
+                                  + m->key_size + m->val_size);
+        if (st != 1) continue;  /* not occupied */
+        unsigned char *old_key = old_slots + i * slot_sz;
+        uint64_t h  = ec_hm_hash_key_(m, old_key);
+        size_t   idx = (size_t)(h & (new_cap - 1));
+        while (*ec_hm_state_(m, idx) == 1)
+            idx = (idx + 1) & (new_cap - 1);
+        memcpy(ec_hm_key_(m, idx),  old_key,             m->key_size);
+        memcpy(ec_hm_val_(m, idx),  old_key + m->key_size, m->val_size);
+        *ec_hm_state_(m, idx) = 1;
+        m->len++;  m->used++;
+    }
+    free(old_slots);
+    return true;
+}
+
+/* Internal: grow the slot table if load factor exceeds 70 %. */
+EC_INLINE bool ec_hm_grow_if_needed_(ec_hashmap *m) {
+    if (m->cap == 0) {
+        /* First allocation. */
+        size_t slot_sz = ec_hm_slot_sz_(m);
+        m->slots = (unsigned char *)calloc(EC_HM_INIT_CAP, slot_sz);
+        if (!m->slots) return false;
+        m->cap = EC_HM_INIT_CAP;
+        return true;
+    }
+    if (m->used * EC_HM_LOAD_SCALE >= m->cap * EC_HM_MAX_LOAD)
+        return ec_hm_resize_(m, m->cap * 2);
+    return true;
+}
+
+/* ---- Public typed macros ----------------------------------------------- */
+
+/**
+ * hm(K, V) — declares a hash map variable with the given key and value
+ * types.  Expands to `ec_hashmap`; the types are captured by the other
+ * hm_* macros via sizeof.
+ */
+#define hm(K, V) ec_hashmap
+
+/**
+ * hm_init(m) — zero-initialises a hash map.  No allocation is performed
+ * until the first hm_set() call.  Safe to call on a map from the stack.
+ */
+#define hm_init(m) memset(&(m), 0, sizeof(m))
+
+/**
+ * hm_set(m, k, v) — inserts or updates a key-value pair.  Both key and
+ * value are copied into the map (shallow memcpy).  On allocation failure
+ * the map is unchanged (the item is silently dropped).
+ *
+ * On the first call, key and value sizes are captured from the arguments
+ * and stored in the map.  Subsequent calls MUST use the same types.
+ *
+ * IMPORTANT for string keys: when using hm(char*, V), the key argument
+ * MUST be a char* lvalue or an explicit cast to char*.  Passing a
+ * string literal directly (e.g. hm_set(m, "key", val)) will treat the
+ * literal as a char array (inline bytes), not as a pointer — use a
+ * variable or write hm_set(m, (char*)"key", val).
+ *
+ * HEAP ALLOCATION: on first call (or when the map grows), allocates
+ * or reallocates the internal slot table.
+ */
+#define hm_set(m, k, v) do { \
+    ec_hashmap *ec_hm_m_ = &(m); \
+    if (ec_hm_m_->key_size == 0) { \
+        ec_hm_m_->key_size = sizeof(k); \
+        ec_hm_m_->val_size = sizeof(v); \
+        ec_hm_m_->str_keys  = (ec_hm_m_->key_size == sizeof(char*)); \
+    } \
+    if (!ec_hm_grow_if_needed_(ec_hm_m_)) break; \
+    /* Temporary copies so &k / &v work with rvalues (literals, expressions). */ \
+    __typeof__(k) ec_hm_tmp_k_ = (k); \
+    __typeof__(v) ec_hm_tmp_v_ = (v); \
+    uint64_t ec_hm_h_ = ec_hm_hash_key_(ec_hm_m_, &ec_hm_tmp_k_); \
+    size_t   ec_hm_i_ = (size_t)(ec_hm_h_ & (ec_hm_m_->cap - 1)); \
+    size_t   ec_hm_tomb_ = (size_t)-1; \
+    for (;;) { \
+        uint8_t ec_hm_st_ = *ec_hm_state_(ec_hm_m_, ec_hm_i_); \
+        if (ec_hm_st_ == 0) { \
+            size_t ec_hm_ins_ = (ec_hm_tomb_ != (size_t)-1) ? ec_hm_tomb_ : ec_hm_i_; \
+            memcpy(ec_hm_key_(ec_hm_m_, ec_hm_ins_), &ec_hm_tmp_k_, ec_hm_m_->key_size); \
+            memcpy(ec_hm_val_(ec_hm_m_, ec_hm_ins_), &ec_hm_tmp_v_, ec_hm_m_->val_size); \
+            *ec_hm_state_(ec_hm_m_, ec_hm_ins_) = 1; \
+            ec_hm_m_->len++; \
+            if (ec_hm_tomb_ == (size_t)-1) ec_hm_m_->used++; \
+            break; \
+        } \
+        if (ec_hm_st_ == 2) { \
+            if (ec_hm_tomb_ == (size_t)-1) ec_hm_tomb_ = ec_hm_i_; \
+        } else if (ec_hm_key_eq_(ec_hm_m_, ec_hm_key_(ec_hm_m_, ec_hm_i_), &ec_hm_tmp_k_)) { \
+            memcpy(ec_hm_val_(ec_hm_m_, ec_hm_i_), &ec_hm_tmp_v_, ec_hm_m_->val_size); \
+            break; \
+        } \
+        ec_hm_i_ = (ec_hm_i_ + 1) & (ec_hm_m_->cap - 1); \
+    } \
+} while (0)
+
+/**
+ * hm_get(m, k, v) — looks up `k` and, if found, copies the associated
+ * value into `*v`.  `v` must be a pointer to a variable of the correct
+ * value type.  Returns true if the key was found.
+ *
+ * Example:
+ *     int val;
+ *     if (hm_get(scores, 42, &val)) println("Found:", val);
+ */
+#define hm_get(m, k, v) \
+    ec_hm_get_impl_(&(m), &(k), (void *)(v))
+/**
+ * NOTE: `k` must be an lvalue (a named variable).  Passing a literal
+ * (e.g. hm_get(m, 42, &v)) is not supported — assign to a variable
+ * first: int key = 42; hm_get(m, key, &v).
+ */
+
+EC_INLINE bool ec_hm_get_impl_(const ec_hashmap *m,
+                               const void *key, void *val_out) {
+    if (!m->slots || m->len == 0 || m->key_size == 0) return false;
+    uint64_t h  = ec_hm_hash_key_(m, key);
+    size_t   idx = (size_t)(h & (m->cap - 1));
+    for (;;) {
+        uint8_t st = *ec_hm_state_(m, idx);
+        if (st == 0) return false;
+        if (st == 1 && ec_hm_key_eq_(m, ec_hm_key_(m, idx), key)) {
+            if (val_out) memcpy(val_out, ec_hm_val_(m, idx), m->val_size);
+            return true;
+        }
+        idx = (idx + 1) & (m->cap - 1);
+    }
+}
+#define hm_contains(m, k) \
+    ec_hm_contains_impl_(&(m), &(k))
+
+EC_INLINE bool ec_hm_contains_impl_(const ec_hashmap *m, const void *key) {
+    return ec_hm_get_impl_(m, key, NULL);
+}
+
+/**
+ * hm_remove(m, k) — removes `k` from the map.  Returns true if the key
+ * was present.  The slot becomes a tombstone so the probing chain is
+ * preserved.
+ */
+#define hm_remove(m, k) \
+    ec_hm_remove_impl_(&(m), &(k))
+
+EC_INLINE bool ec_hm_remove_impl_(ec_hashmap *m, const void *key) {
+    if (!m->slots || m->len == 0 || m->key_size == 0) return false;
+    uint64_t h  = ec_hm_hash_key_(m, key);
+    size_t   idx = (size_t)(h & (m->cap - 1));
+    for (;;) {
+        uint8_t st = *ec_hm_state_(m, idx);
+        if (st == 0) return false;
+        if (st == 1 && ec_hm_key_eq_(m, ec_hm_key_(m, idx), key)) {
+            *ec_hm_state_(m, idx) = 2;  /* tombstone */
+            m->len--;
+            return true;
+        }
+        idx = (idx + 1) & (m->cap - 1);
+    }
+}
+
+/**
+ * hm_clear(m) — removes all entries but retains the allocated slot
+ * table.  Subsequent hm_set() calls reuse the existing buffer.
+ */
+#define hm_clear(m) do { \
+    ec_hashmap *ec_hm_mc_ = &(m); \
+    if (ec_hm_mc_->slots) { \
+        memset(ec_hm_mc_->slots, 0, ec_hm_mc_->cap * ec_hm_slot_sz_(ec_hm_mc_)); \
+    } \
+    ec_hm_mc_->len = 0; \
+    ec_hm_mc_->used = 0; \
+} while (0)
+
+/**
+ * hm_free(m) — frees the slot table and zeros the map.  Safe to call
+ * on an already-freed or zero-initialised map.
+ */
+#define hm_free(m) do { \
+    ec_hashmap *ec_hm_mf_ = &(m); \
+    free(ec_hm_mf_->slots); \
+    ec_hm_mf_->slots = NULL; \
+    ec_hm_mf_->cap = 0; \
+    ec_hm_mf_->len = 0; \
+    ec_hm_mf_->used = 0; \
+    ec_hm_mf_->key_size = 0; \
+    ec_hm_mf_->val_size = 0; \
+} while (0)
+
+/**
+ * hm_size(m) — returns the number of key-value pairs currently stored.
+ */
+#define hm_size(m)  ((m).len)
+
+/**
+ * hm_empty(m) — returns true if the map contains no entries.
+ */
+#define hm_empty(m) ((m).len == 0)
+
+
+/* Internal: strdup for backward-compat ec_hm_set / ec_hm_del. */
 EC_INLINE char *ec_hm_strdup_(const char *s, size_t len) {
     char *copy = (char *)malloc(len + 1);
     if (!copy) return NULL;
@@ -1301,151 +1611,81 @@ EC_INLINE char *ec_hm_strdup_(const char *s, size_t len) {
     copy[len] = '\0';
     return copy;
 }
-
-/* Slot state: EMPTY (never used), OCCUPIED (live), TOMBSTONE (deleted). */
-typedef enum {
-    EC_HM_EMPTY     = 0,
-    EC_HM_OCCUPIED  = 1,
-    EC_HM_TOMBSTONE = 2
-} ec_hm_state;
-
-typedef struct {
-    char       *key;
-    size_t      key_len;
-    char       *val;
-    size_t      val_len;
-    ec_hm_state state;
-} ec_hm_slot;
-
-typedef struct {
-    ec_hm_slot *slots;
-    size_t      cap;   /* power of 2 — number of slots */
-    size_t      len;   /* occupied slots (not counting tombstones) */
-    size_t      used;  /* occupied + tombstones (drives load factor) */
-} ec_hashmap;
-
-#define EC_HM_INIT_CAP   16
-#define EC_HM_MAX_LOAD    7   /* numerator   */
-#define EC_HM_LOAD_SCALE  10  /* denominator => 70 % max load */
+/* ---- Backward-compatible string→string wrappers ------------------------ */
 
 /**
- * ec_hm_new() — creates a hash map with the default initial capacity
- * (16 slots).  Returns a valid-but-empty map; slots will be NULL on
- * allocation failure — check m.slots before using.
+ * ec_hm_new() — creates a string→string hash map.  Equivalent to
+ * `hm(char*, char*); hm_init(m);`.  Provided for backward compatibility.
  *
- * HEAP ALLOCATION: the returned map owns its slot table, which must be
- * released with ec_hm_free().
+ * HEAP ALLOCATION: the slot table is allocated on first set, not here.
+ * The returned map must be released with ec_hm_free().
  */
 EC_INLINE ec_hashmap ec_hm_new(void) {
     ec_hashmap m;
-    m.cap   = EC_HM_INIT_CAP;
-    m.len   = 0;
-    m.used  = 0;
-    m.slots = (ec_hm_slot *)calloc(EC_HM_INIT_CAP, sizeof(ec_hm_slot));
+    memset(&m, 0, sizeof(m));
+    m.key_size = sizeof(char*);
+    m.val_size = sizeof(char*);
+    m.str_keys = true;
     return m;
 }
 
-/* Internal: grow (or shrink) the slot table to `new_cap` (must be power
- * of 2).  Rehashes all live entries.  On failure the map is unchanged. */
-EC_INLINE bool ec_hm_resize_(ec_hashmap *m, size_t new_cap) {
-    ec_hm_slot *old      = m->slots;
-    size_t      old_cap  = m->cap;
-
-    m->slots = (ec_hm_slot *)calloc(new_cap, sizeof(ec_hm_slot));
-    if (!m->slots) { m->slots = old; return false; }
-    m->cap  = new_cap;
-    m->len  = 0;
-    m->used = 0;
-
-    for (size_t i = 0; i < old_cap; i++) {
-        if (old[i].state != EC_HM_OCCUPIED) continue;
-        uint64_t h  = ec_hm_hash_(old[i].key, old[i].key_len);
-        size_t   idx = (size_t)(h & (new_cap - 1));
-        while (m->slots[idx].state == EC_HM_OCCUPIED)
-            idx = (idx + 1) & (new_cap - 1);
-        m->slots[idx] = old[i];       /* struct copy — pointers stay valid */
-        m->slots[idx].state = EC_HM_OCCUPIED;
-        m->len++;  m->used++;
-    }
-    free(old);
-    return true;
-}
-
 /**
- * ec_hm_set(map, key, val) — inserts or updates a key-value pair.
- * Both `key` and `val` are copied internally (the caller retains
- * ownership of the originals).  Returns true on success, false on
- * allocation failure (map is unchanged).
- *
- * HEAP ALLOCATION: each call allocates copies of key and val.
+ * ec_hm_set(map, key, val) — string→string convenience wrapper.
+ * Returns true on success.
  */
 EC_INLINE bool ec_hm_set(ec_hashmap *m, const char *key, const char *val) {
-    if (!m->slots) return false;
-
-    /* Grow at 70 % load factor to keep probes short. */
-    if (m->used * EC_HM_LOAD_SCALE >= m->cap * EC_HM_MAX_LOAD) {
-        if (!ec_hm_resize_(m, m->cap * 2)) return false;
+    if (m->key_size == 0) {
+        m->key_size = sizeof(char*);
+        m->val_size = sizeof(char*);
+        m->str_keys = true;
     }
-
-    size_t   key_len = strlen(key);
-    uint64_t hash    = ec_hm_hash_(key, key_len);
-    size_t   idx     = (size_t)(hash & (m->cap - 1));
-    size_t   tomb    = (size_t)-1;   /* first tombstone slot, if any */
-
+    if (!ec_hm_grow_if_needed_(m)) return false;
+    uint64_t h  = ec_hm_hash_key_(m, &key);
+    size_t   idx = (size_t)(h & (m->cap - 1));
+    size_t   tomb = (size_t)-1;
     for (;;) {
-        if (m->slots[idx].state == EC_HM_EMPTY) {
+        uint8_t st = *ec_hm_state_(m, idx);
+        if (st == 0) {
             size_t ins = (tomb != (size_t)-1) ? tomb : idx;
-            char *kc = ec_hm_strdup_(key, key_len);
-            if (!kc) return false;
-            size_t val_len = strlen(val);
-            char *vc = ec_hm_strdup_(val, val_len);
-            if (!vc) { free(kc); return false; }
-            m->slots[ins].key     = kc;
-            m->slots[ins].key_len = key_len;
-            m->slots[ins].val     = vc;
-            m->slots[ins].val_len = val_len;
-            m->slots[ins].state   = EC_HM_OCCUPIED;
+            char **kp = (char **)ec_hm_key_(m, ins);
+            char **vp = (char **)ec_hm_val_(m, ins);
+            *kp = key ? ec_hm_strdup_(key, strlen(key)) : NULL;
+            if (key && !*kp) return false;
+            *vp = val ? ec_hm_strdup_(val, strlen(val)) : NULL;
+            if (val && !*vp) { free(*kp); *kp = NULL; return false; }
+            *ec_hm_state_(m, ins) = 1;
             m->len++;
             if (tomb == (size_t)-1) m->used++;
             return true;
         }
-        if (m->slots[idx].state == EC_HM_TOMBSTONE) {
+        if (st == 2) {
             if (tomb == (size_t)-1) tomb = idx;
-        } else if (m->slots[idx].state == EC_HM_OCCUPIED) {
-            if (m->slots[idx].key_len == key_len &&
-                memcmp(m->slots[idx].key, key, key_len) == 0) {
-                /* Update existing key — replace value. */
-                size_t val_len = strlen(val);
-                char *vc = ec_hm_strdup_(val, val_len);
-                if (!vc) return false;
-                free(m->slots[idx].val);
-                m->slots[idx].val     = vc;
-                m->slots[idx].val_len = val_len;
-                return true;
-            }
+        } else if (ec_hm_key_eq_(m, ec_hm_key_(m, idx), &key)) {
+            char **vp = (char **)ec_hm_val_(m, idx);
+            char *new_v = val ? ec_hm_strdup_(val, strlen(val)) : NULL;
+            if (val && !new_v) return false;
+            free(*vp);
+            *vp = new_v;
+            return true;
         }
         idx = (idx + 1) & (m->cap - 1);
     }
 }
 
 /**
- * ec_hm_get(map, key) — returns the value associated with `key`, or
- * NULL if the key is not present.  The returned pointer is owned by
- * the map — do not free it.
+ * ec_hm_get(map, key) — string→string convenience wrapper.
+ * Returns the value associated with `key`, or NULL if not found.
+ * The returned pointer is owned by the map — do not free it.
  */
 EC_INLINE const char *ec_hm_get(const ec_hashmap *m, const char *key) {
     if (!m->slots || m->len == 0) return NULL;
-    size_t   key_len = strlen(key);
-    uint64_t hash    = ec_hm_hash_(key, key_len);
-    size_t   idx     = (size_t)(hash & (m->cap - 1));
-
+    uint64_t h  = ec_hm_hash_key_(m, &key);
+    size_t   idx = (size_t)(h & (m->cap - 1));
     for (;;) {
-        if (m->slots[idx].state == EC_HM_EMPTY) return NULL;
-        if (m->slots[idx].state == EC_HM_OCCUPIED &&
-            m->slots[idx].key_len == key_len &&
-            memcmp(m->slots[idx].key, key, key_len) == 0) {
-            return m->slots[idx].val;
-        }
+        uint8_t st = *ec_hm_state_(m, idx);
+        if (st == 0) return NULL;
+        if (st == 1 && ec_hm_key_eq_(m, ec_hm_key_(m, idx), &key))
+            return *(const char *const *)ec_hm_val_(m, idx);
         idx = (idx + 1) & (m->cap - 1);
     }
 }
@@ -1459,25 +1699,19 @@ EC_INLINE bool ec_hm_has(const ec_hashmap *m, const char *key) {
 
 /**
  * ec_hm_del(map, key) — removes `key` from the map.  Returns true if
- * the key was present, false otherwise.  Internal memory for the
- * key and value is freed.
+ * the key was present.  Internal string copies are freed.
  */
 EC_INLINE bool ec_hm_del(ec_hashmap *m, const char *key) {
     if (!m->slots || m->len == 0) return false;
-    size_t   key_len = strlen(key);
-    uint64_t hash    = ec_hm_hash_(key, key_len);
-    size_t   idx     = (size_t)(hash & (m->cap - 1));
-
+    uint64_t h  = ec_hm_hash_key_(m, &key);
+    size_t   idx = (size_t)(h & (m->cap - 1));
     for (;;) {
-        if (m->slots[idx].state == EC_HM_EMPTY) return false;
-        if (m->slots[idx].state == EC_HM_OCCUPIED &&
-            m->slots[idx].key_len == key_len &&
-            memcmp(m->slots[idx].key, key, key_len) == 0) {
-            free(m->slots[idx].key);
-            free(m->slots[idx].val);
-            m->slots[idx].state = EC_HM_TOMBSTONE;
-            m->slots[idx].key   = NULL;
-            m->slots[idx].val   = NULL;
+        uint8_t st = *ec_hm_state_(m, idx);
+        if (st == 0) return false;
+        if (st == 1 && ec_hm_key_eq_(m, ec_hm_key_(m, idx), &key)) {
+            free(*(char **)ec_hm_key_(m, idx));
+            free(*(char **)ec_hm_val_(m, idx));
+            *ec_hm_state_(m, idx) = 2;
             m->len--;
             return true;
         }
@@ -1488,28 +1722,26 @@ EC_INLINE bool ec_hm_del(ec_hashmap *m, const char *key) {
 /**
  * ec_hm_len(map) — returns the number of key-value pairs in the map.
  */
-EC_INLINE size_t ec_hm_len(const ec_hashmap *m) {
-    return m->len;
-}
+EC_INLINE size_t ec_hm_len(const ec_hashmap *m) { return m->len; }
 
 /**
- * ec_hm_free(map) — frees all keys, values, and the slot table.  The
- * map is zeroed out and safe to reuse or discard.
+ * ec_hm_free(map) — frees all internally-owned string copies and the
+ * slot table.  The map is zeroed out.
  */
 EC_INLINE void ec_hm_free(ec_hashmap *m) {
-    if (!m->slots) return;
-    for (size_t i = 0; i < m->cap; i++) {
-        if (m->slots[i].state == EC_HM_OCCUPIED) {
-            free(m->slots[i].key);
-            free(m->slots[i].val);
+    if (!m->slots) { memset(m, 0, sizeof(*m)); return; }
+    if (m->str_keys && m->key_size == sizeof(char*)) {
+        for (size_t i = 0; i < m->cap; i++) {
+            if (*ec_hm_state_(m, i) == 1) {
+                free(*(char **)ec_hm_key_(m, i));
+                free(*(char **)ec_hm_val_(m, i));
+            }
         }
     }
     free(m->slots);
-    m->slots = NULL;
-    m->cap   = 0;
-    m->len   = 0;
-    m->used  = 0;
+    memset(m, 0, sizeof(*m));
 }
+
 
 /* ===========================================================================
  * Section 16: Pool allocator  (fixed-size, O(1) alloc / free)
@@ -1858,6 +2090,463 @@ EC_INLINE const char *string_cstr(const ec_string *s) {
     return s->data ? s->data : "";
 }
 
+/**
+ * string_from(text) — creates a new ec_string initialised with a copy
+ * of the given C string.  The argument may be NULL, in which case an
+ * empty string is returned.
+ *
+ * HEAP ALLOCATION: the returned string must be freed with string_free().
+ *
+ * Example:
+ *     ec_string s = string_from("hello");
+ *     println(s.data);
+ *     string_free(&s);
+ */
+EC_INLINE ec_string string_from(const char *text) {
+    ec_string s = string_new();
+    if (text) string_append(&s, text);
+    return s;
+}
+
+/**
+ * string_insert(s, index, text) — inserts `text` at position `index` in
+ * the string, shifting existing characters to the right.  `index` may be
+ * `s->len` (equivalent to string_append).  Undefined if `index` > `s->len`.
+ *
+ * O(n) where n is the number of characters shifted.
+ *
+ * Example:
+ *     ec_string s = string_from("hello");
+ *     string_insert(&s, 5, " world");   // "hello world"
+ *     string_free(&s);
+ */
+EC_INLINE void string_insert(ec_string *s, size_t index, const char *text) {
+    size_t tlen = strlen(text);
+    if (tlen == 0) return;
+    ec_string_grow_(s, tlen);
+    if (!s->data) return;
+    if (index < s->len) {
+        memmove(s->data + index + tlen, s->data + index, s->len - index);
+    }
+    memcpy(s->data + index, text, tlen);
+    s->len += tlen;
+    s->data[s->len] = '\0';
+}
+
+/**
+ * string_remove(s, index, count) — removes `count` characters starting
+ * at `index`, shifting subsequent characters left.  If `index + count`
+ * exceeds the string length, only the characters up to the end are
+ * removed.  Safe to call on an empty string (no-op).
+ *
+ * O(n) where n is the number of characters shifted.
+ *
+ * Example:
+ *     ec_string s = string_from("hello world");
+ *     string_remove(&s, 5, 6);          // "hello"
+ *     string_free(&s);
+ */
+EC_INLINE void string_remove(ec_string *s, size_t index, size_t count) {
+    if (index >= s->len) return;
+    if (index + count > s->len) count = s->len - index;
+    if (count == 0) return;
+    memmove(s->data + index, s->data + index + count, s->len - index - count + 1);
+    s->len -= count;
+}
+
+/**
+ * string_capacity(s) — returns the currently allocated capacity
+ * (excluding the null terminator).  Returns 0 if the string has no
+ * allocation yet.
+ */
+EC_INLINE size_t string_capacity(const ec_string *s) { return s->cap; }
+
+/**
+ * string_equals(a, b) — returns true if the two ec_strings have
+ * identical contents.  Equivalent to strcmp(a.data, b.data) == 0.
+ * Either argument may be NULL (treated as empty).
+ *
+ * Example:
+ *     ec_string a = string_from("abc");
+ *     ec_string b = string_from("abc");
+ *     if (string_equals(&a, &b)) println("match");
+ *     string_free(&a); string_free(&b);
+ */
+EC_INLINE bool string_equals(const ec_string *a, const ec_string *b) {
+    const char *ad = a && a->data ? a->data : "";
+    const char *bd = b && b->data ? b->data : "";
+    return strcmp(ad, bd) == 0;
+}
+
+/**
+ * string_contains(s, text) — returns true if `text` occurs anywhere
+ * inside the ec_string's data.
+ *
+ * Example:
+ *     ec_string s = string_from("hello world");
+ *     if (string_contains(&s, "world")) println("found it");
+ *     string_free(&s);
+ */
+EC_INLINE bool string_contains(const ec_string *s, const char *text) {
+    if (!s || !s->data) return !*text;
+    return strstr(s->data, text) != NULL;
+}
+
+/**
+ * string_starts_with(s, text) — returns true if the ec_string's data
+ * begins with `text`.
+ *
+ * Example:
+ *     ec_string s = string_from("/usr/local/bin");
+ *     if (string_starts_with(&s, "/usr")) println("in /usr");
+ *     string_free(&s);
+ */
+EC_INLINE bool string_starts_with(const ec_string *s, const char *text) {
+    if (!s || !s->data) return !*text;
+    size_t tlen = strlen(text);
+    return s->len >= tlen && memcmp(s->data, text, tlen) == 0;
+}
+
+/**
+ * string_ends_with(s, text) — returns true if the ec_string's data ends
+ * with `text`.
+ *
+ * Example:
+ *     ec_string s = string_from("report.pdf");
+ *     if (string_ends_with(&s, ".pdf")) println("PDF file");
+ *     string_free(&s);
+ */
+EC_INLINE bool string_ends_with(const ec_string *s, const char *text) {
+    if (!s || !s->data) return !*text;
+    size_t tlen = strlen(text);
+    if (tlen > s->len) return false;
+    return memcmp(s->data + s->len - tlen, text, tlen) == 0;
+}
+
+/**
+ * string_lowercase(s) — converts the ec_string's contents to lowercase
+ * IN PLACE.
+ *
+ * Example:
+ *     ec_string s = string_from("HELLO");
+ *     string_lowercase(&s);   // "hello"
+ *     string_free(&s);
+ */
+EC_INLINE void string_lowercase(ec_string *s) {
+    if (!s || !s->data) return;
+    for (size_t i = 0; i < s->len; i++)
+        s->data[i] = (char)tolower((unsigned char)s->data[i]);
+}
+
+/**
+ * string_uppercase(s) — converts the ec_string's contents to uppercase
+ * IN PLACE.
+ *
+ * Example:
+ *     ec_string s = string_from("hello");
+ *     string_uppercase(&s);   // "HELLO"
+ *     string_free(&s);
+ */
+EC_INLINE void string_uppercase(ec_string *s) {
+    if (!s || !s->data) return;
+    for (size_t i = 0; i < s->len; i++)
+        s->data[i] = (char)toupper((unsigned char)s->data[i]);
+}
+
+/**
+ * string_trim(s) — removes leading and trailing whitespace from the
+ * ec_string IN PLACE.  The capacity is unchanged; only the length is
+ * updated and a new null terminator is written.
+ *
+ * Example:
+ *     ec_string s = string_from("   hi there   ");
+ *     string_trim(&s);        // "hi there"
+ *     string_free(&s);
+ */
+EC_INLINE void string_trim(ec_string *s) {
+    if (!s || !s->data || s->len == 0) return;
+    size_t start = 0;
+    while (start < s->len && isspace((unsigned char)s->data[start])) start++;
+    if (start == s->len) { s->data[0] = '\0'; s->len = 0; return; }
+    size_t end = s->len - 1;
+    while (end > start && isspace((unsigned char)s->data[end])) end--;
+    size_t new_len = end - start + 1;
+    if (start > 0) memmove(s->data, s->data + start, new_len);
+    s->data[new_len] = '\0';
+    s->len = new_len;
+}
+
+/**
+ * string_printf(fmt, ...) — creates a new ec_string from a printf-style
+ * format string and arguments.  The buffer is sized exactly to fit the
+ * formatted result.
+ *
+ * HEAP ALLOCATION: the returned string must be freed with string_free().
+ *
+ * Example:
+ *     ec_string msg = string_printf("Value: %d (%.2f%%)", 42, 87.3);
+ *     println(msg.data);
+ *     string_free(&msg);
+ */
+EC_INLINE ec_string string_printf(const char *fmt, ...) {
+    ec_string s = string_new();
+    va_list args;
+    va_start(args, fmt);
+    int n = vsnprintf(NULL, 0, fmt, args);
+    va_end(args);
+    if (n <= 0) return s;
+
+    s.cap  = (size_t)n + 1;
+    s.data = (char *)malloc(s.cap);
+    if (!s.data) { s.cap = 0; return s; }
+
+    va_start(args, fmt);
+    vsnprintf(s.data, s.cap, fmt, args);
+    va_end(args);
+    s.len = (size_t)n;
+    return s;
+}
+
+/**
+ * string_length(s) — returns the current length (excluding the null
+ * terminator).  Identical to string_len(s); provided as a more
+ * descriptive alias.
+ */
+EC_INLINE size_t string_length(const ec_string *s) { return s->len; }
+
+
+/* ===========================================================================
+ * Section 18: Logging
+ * =========================================================================
+ *
+ * Colored, timestamped logging macros that write to stderr.  Each
+ * message is automatically prefixed with a [HH:MM:SS] timestamp and
+ * the log level, and the level label is colorised with ANSI escapes.
+ *
+ * On Windows, call ec_init_colors() once at the start of main() to
+ * enable ANSI escape processing in the console.  On Linux / macOS,
+ * ANSI escapes work natively and ec_init_colors() is a no-op.
+ *
+ * Define EC_NO_COLORS before including eacy.h to disable ANSI color
+ * codes globally — only the raw text and timestamp are printed.
+ *
+ * Example:
+ *     ec_init_colors();
+ *     log_info("Server starting on port", port);
+ *     log_warn("Config file not found, using defaults");
+ *     log_error("Connection refused");
+ *     log_debug("Request took", elapsed, "ms");
+ */
+
+#if !defined(EC_NO_COLORS)
+  #define EC_LOG_RED_     "\x1b[31m"
+  #define EC_LOG_YELLOW_  "\x1b[33m"
+  #define EC_LOG_CYAN_    "\x1b[36m"
+  #define EC_LOG_DIM_     "\x1b[2m"
+  #define EC_LOG_RESET_   "\x1b[0m"
+#else
+  #define EC_LOG_RED_     ""
+  #define EC_LOG_YELLOW_  ""
+  #define EC_LOG_CYAN_    ""
+  #define EC_LOG_DIM_     ""
+  #define EC_LOG_RESET_   ""
+#endif
+
+
+/* Internal: stderr-aware print helpers so log messages go to stderr,
+ * not stdout.  These mirror ec_print_* / ec_print_one. */
+EC_INLINE void ec_log_int_(int v)          { fprintf(stderr, "%d", v); }
+EC_INLINE void ec_log_long_(long v)        { fprintf(stderr, "%ld", v); }
+EC_INLINE void ec_log_float_(float v)      { fprintf(stderr, "%g", (double)v); }
+EC_INLINE void ec_log_double_(double v)    { fprintf(stderr, "%g", v); }
+EC_INLINE void ec_log_char_(char v)        { fputc(v, stderr); }
+EC_INLINE void ec_log_str_(char *v)        { fputs(v, stderr); }
+EC_INLINE void ec_log_cstr_(const char *v) { fputs(v, stderr); }
+EC_INLINE void ec_log_bool_(bool v)        { fputs(v ? "true" : "false", stderr); }
+EC_INLINE void ec_log_ptr_(const void *v)  { fprintf(stderr, "%p", v); }
+EC_INLINE void ec_log_sep_(void)           { fputc(' ', stderr); }
+
+#define ec_log_one_(x) _Generic((x), \
+    bool:            ec_log_bool_,   \
+    char:            ec_log_char_,   \
+    int:             ec_log_int_,    \
+    long:            ec_log_long_,   \
+    float:           ec_log_float_,  \
+    double:          ec_log_double_, \
+    char*:           ec_log_str_,    \
+    const char*:     ec_log_cstr_,   \
+    default:         ec_log_ptr_     \
+)(x)
+/* Internal: writes a [HH:MM:SS] timestamp to stderr. */
+EC_INLINE void ec_log_timestamp_(void) {
+    time_t now = time(NULL);
+    struct tm *tm_info = localtime(&now);
+    char buf[16];
+    strftime(buf, sizeof(buf), "[%H:%M:%S]", tm_info);
+    fputs(buf, stderr);
+}
+
+/**
+ * log_info(...) — prints an info-level message to stderr with a
+ * cyan "INFO" label and timestamp.  Arguments are forwarded to
+ * print() (no format strings — pass values directly).
+ *
+ * Example:
+ *     log_info("Listening on port", 8080);
+ *     // -> [14:32:05] INFO  Listening on port 8080
+ */
+#define log_info(...) do { \
+    ec_log_timestamp_(); \
+    fputs(EC_LOG_CYAN_ " INFO  " EC_LOG_RESET_, stderr); \
+    EC_FOR_EACH(ec_log_one_, ec_log_sep_, __VA_ARGS__); \
+    fputc('\n', stderr); \
+} while (0)
+
+/**
+ * log_warn(...) — prints a warning-level message to stderr with a
+ * yellow "WARN" label and timestamp.
+ *
+ * Example:
+ *     log_warn("Low disk space:", free_mb, "MB remaining");
+ *     // -> [14:32:06] WARN  Low disk space: 42 MB remaining
+ */
+#define log_warn(...) do { \
+    ec_log_timestamp_(); \
+    fputs(EC_LOG_YELLOW_ " WARN  " EC_LOG_RESET_, stderr); \
+    EC_FOR_EACH(ec_log_one_, ec_log_sep_, __VA_ARGS__); \
+    fputc('\n', stderr); \
+} while (0)
+
+/**
+ * log_error(...) — prints an error-level message to stderr with a
+ * red "ERROR" label and timestamp.
+ *
+ * Example:
+ *     log_error("Failed to open", filename);
+ *     // -> [14:32:07] ERROR Failed to open data.txt
+ */
+#define log_error(...) do { \
+    ec_log_timestamp_(); \
+    fputs(EC_LOG_RED_ " ERROR " EC_LOG_RESET_, stderr); \
+    EC_FOR_EACH(ec_log_one_, ec_log_sep_, __VA_ARGS__); \
+    fputc('\n', stderr); \
+} while (0)
+
+/**
+ * log_debug(...) — prints a debug-level message to stderr with a
+ * dimmed "DEBUG" label and timestamp.  Useful for development
+ * tracing; compile it out by wrapping calls in #if guards if
+ * desired.
+ *
+ * Example:
+ *     log_debug("Request #", req_id, "from", client_ip);
+ *     // -> [14:32:08] DEBUG Request #42 from 127.0.0.1
+ */
+#define log_debug(...) do { \
+    ec_log_timestamp_(); \
+    fputs(EC_LOG_DIM_ " DEBUG " EC_LOG_RESET_, stderr); \
+    EC_FOR_EACH(ec_log_one_, ec_log_sep_, __VA_ARGS__); \
+    fputc('\n', stderr); \
+} while (0)
+
+/* ===========================================================================
+ * Section 19: Stopwatch (simple high-resolution timer)
+ * =========================================================================
+ *
+ * A thin wrapper around current_time_ms() that makes ad-hoc timing
+ * measurements easy to write and read.
+ *
+ * Example:
+ *     ec_timer t = timer_start();
+ *     do_work();
+ *     println("Took", (long)timer_elapsed_ms(&t), "ms");
+ */
+
+typedef struct {
+    long long start;   /* timestamp captured at timer_start() */
+} ec_timer;
+
+/**
+ * timer_start() — captures the current monotonic time and returns an
+ * ec_timer ready for measurement.  The value is obtained from
+ * current_time_ms(), so it is safe against wall-clock adjustments.
+ */
+EC_INLINE ec_timer timer_start(void) {
+    ec_timer t;
+    t.start = current_time_ms();
+    return t;
+}
+
+/**
+ * timer_restart(t) — resets the timer to the current time.  Equivalent
+ * to `*t = timer_start()` but slightly more descriptive at the call
+ * site.
+ */
+EC_INLINE void timer_restart(ec_timer *t) {
+    t->start = current_time_ms();
+}
+
+/**
+ * timer_elapsed_ms(t) — returns the number of milliseconds that have
+ * elapsed since the timer was started or last restarted.
+ */
+EC_INLINE long long timer_elapsed_ms(const ec_timer *t) {
+    return current_time_ms() - t->start;
+}
+
+/**
+ * timer_elapsed_seconds(t) — returns elapsed time in seconds (with
+ * sub-millisecond precision as a double).
+ */
+EC_INLINE double timer_elapsed_seconds(const ec_timer *t) {
+    return (double)(current_time_ms() - t->start) / 1000.0;
+}
+
+/* ===========================================================================
+ * Section 20: Benchmark helpers
+ * =========================================================================
+ *
+ * Zero-fuss benchmarking macros built on top of ec_timer.  Wrap any
+ * block of code and EaCy prints the elapsed time automatically.
+ *
+ * Example (single run):
+ *     benchmark("qsort 1e6 ints") {
+ *         qsort(data, 1000000, sizeof(int), ec_cmp_int);
+ *     }
+ *     // -> qsort 1e6 ints: 42 ms
+ *
+ * Example (averaged over N runs):
+ *     benchmark_avg("FFT 4096", 100) {
+ *         fft_4096(signal);
+ *     }
+ *     // -> FFT 4096: 0.127 ms avg
+ */
+
+/**
+ * benchmark(label) { ... } — times the execution of a single block and
+ * prints the label followed by the elapsed time in milliseconds.
+ */
+#define benchmark(label) \
+    for (ec_timer ec_bm_t_ = timer_start(), *_ec_bm_d_ = &ec_bm_t_; \
+         _ec_bm_d_ != NULL; \
+         printf("%s: %lld ms\n", label, \
+                (long long)timer_elapsed_ms(_ec_bm_d_)), \
+         _ec_bm_d_ = NULL)
+
+/**
+ * benchmark_avg(label, n) { ... } — runs the block `n` times and
+ * prints the label followed by the average elapsed time in
+ * milliseconds.  `n` is evaluated once.
+ */
+#define benchmark_avg(label, n) \
+    for (struct { long long total; long i; ec_timer t; } \
+         ec_bm_ = {0, 0, {current_time_ms()}}; \
+         ec_bm_.i < (long)(n) || \
+         (printf("%s: %.3f ms avg\n", label, \
+                 (double)ec_bm_.total / (double)(n)), 0); \
+         ec_bm_.total += timer_elapsed_ms(&ec_bm_.t), \
+         ec_bm_.i++, \
+         ec_bm_.t = timer_start())
 #if defined(__cplusplus)
 } /* extern "C" */
 #endif

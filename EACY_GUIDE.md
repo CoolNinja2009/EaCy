@@ -11,7 +11,6 @@ branch-free where possible.
 
 ---
 
-## Table of Contents
 
 1. [Quick Start](#quick-start)
 2. [Printing](#printing)
@@ -30,11 +29,13 @@ branch-free where possible.
 15. [Pool Allocator](#pool-allocator)
 16. [String Builder](#string-builder)
 17. [CLI Arguments](#cli-arguments)
-18. [Memory Debugging](#memory-debugging)
-19. [Complete Programs](#complete-programs)
-20. [Naming Conventions](#naming-conventions)
-21. [Performance Notes](#performance-notes)
-
+18. [Logging](#logging)
+19. [Stopwatch](#stopwatch)
+20. [Benchmark](#benchmark)
+21. [Memory Debugging](#memory-debugging)
+22. [Complete Programs](#complete-programs)
+23. [Naming Conventions](#naming-conventions)
+24. [Performance Notes](#performance-notes)
 ---
 
 ## Quick Start
@@ -422,78 +423,124 @@ Write your own comparator with the standard `qsort` signature:
   by the debug tracker. Use `ec_malloc` for your own allocations.
 
 ---
-
 ## Hash Map
 
-Fast string-to-string hash map. Open addressing with linear probing (great
-cache behavior), FNV-1a 64-bit hashing, power-of-2 capacity with bitmask
-lookup.
+A type-safe, macro-driven hash map for any key and value type. Open
+addressing with linear probing, FNV-1a hashing, 70% load factor.
+Keys and values are stored inline (shallow copy), so the map owns its data.
+
+### Declaring a map
+
+Use `hm(KeyType, ValueType)` — it expands to the internal `ec_hashmap` type.
+
+```c
+hm(int, int)    scores;    // int → int
+hm(char*, float) prices;   // string → float
+hm(MyKey, MyVal) custom;   // custom struct → struct
+```
 
 ### Basic usage
 
 ```c
-ec_hashmap m = ec_hm_new();
+hm(int, int) scores;
+hm_init(scores);                       // no allocation yet
 
-ec_hm_set(&m, "name",  "Alice");
-ec_hm_set(&m, "score", "42");
-ec_hm_set(&m, "city",  "Paris");
+hm_set(scores, 42, 100);
+hm_set(scores, 7, 200);
+hm_set(scores, 99, 300);
+assert(hm_size(scores) == 3);
 
-println(ec_hm_get(&m, "name"));   // Alice
-println(ec_hm_get(&m, "city"));   // Paris
+int val;
+if (hm_get(scores, 42, &val))          // found → copies into val
+    println("Score:", val);            // Score: 100
 
-if (ec_hm_has(&m, "score")) println("score exists");
+if (hm_contains(scores, 99))
+    println("99 exists");
 
-ec_hm_del(&m, "score");           // remove key
-println("len:", (long)ec_hm_len(&m));  // 2
+hm_remove(scores, 7);                  // remove key
+assert(hm_size(scores) == 2);
 
-ec_hm_free(&m);                   // free all keys, values, and slots
+hm_free(scores);                       // free everything
 ```
 
-### Updating values
+### String keys
+
+When key type is `char*`, comparison and hashing use the string *content*
+(strcmp / FNV-1a), not the pointer address. Keys MUST be `char*` lvalues —
+pass a variable, not a string literal directly:
 
 ```c
-ec_hm_set(&m, "score", "42");    // insert
-ec_hm_set(&m, "score", "99");    // update — old value is freed
-println(ec_hm_get(&m, "score")); // 99
+hm(char*, float) prices;
+hm_init(prices);
+
+const char *apple  = "apple";          // lvalue — correct
+hm_set(prices, apple, 1.29f);
+// hm_set(prices, "apple", 1.29f);     // WRONG — literal treated as array
+
+float price;
+if (hm_get(prices, apple, &price))
+    println("Price:", price);
+
+hm_free(prices);
 ```
 
-### Iterating all entries
+To set with a literal, cast it: `hm_set(prices, (char*)"apple", 1.29f)`.
+
+### Clear and reuse
+
+```c
+hm_clear(scores);                      // keep buffer, reset count
+hm_set(scores, 1, 10);                 // reuse existing memory
+```
+
+### Backward-compatible string→string API
+
+The original `ec_hm_*` functions still work:
 
 ```c
 ec_hashmap m = ec_hm_new();
-ec_hm_set(&m, "a", "1");
-ec_hm_set(&m, "b", "2");
-
-for (size_t i = 0; i < m.cap; i++) {
-    if (m.slots[i].state == EC_HM_OCCUPIED) {
-        print(m.slots[i].key, "=", m.slots[i].val);
-    }
-}
+ec_hm_set(&m, "name", "Alice");        // keys/values are strdup'd
+println(ec_hm_get(&m, "name"));        // "Alice"
+ec_hm_del(&m, "name");
 ec_hm_free(&m);
 ```
 
-### Reference
+Use this when you need the map to own string copies (free'd on remove/free).
+
+### Reference — generic API
+
+| Macro | What it does |
+|---|---|
+| `hm(K,V)` | Declare variable of type `ec_hashmap` |
+| `hm_init(m)` | Zero-initialise (no allocation) |
+| `hm_set(m, k, v)` | Insert or update (shallow copy) |
+| `hm_get(m, k, v)` | Look up — copies value into `*v`, returns bool |
+| `hm_contains(m, k)` | `true` if key exists |
+| `hm_remove(m, k)` | Remove key (returns `true` if present) |
+| `hm_clear(m)` | Remove all entries (keeps buffer) |
+| `hm_free(m)` | Free slot table, zero struct |
+| `hm_size(m)` | Number of entries |
+| `hm_empty(m)` | `true` if empty |
+
+### Reference — backward-compatible API
 
 | Function | What it does |
 |---|---|
-| `ec_hm_new()` | Create empty map (16 slots) |
-| `ec_hm_set(m, k, v)` | Insert or update (copies k, v) |
+| `ec_hm_new()` | Create string→string map |
+| `ec_hm_set(m, k, v)` | Insert (strdup's k and v) |
 | `ec_hm_get(m, k)` | Get value or NULL |
 | `ec_hm_has(m, k)` | Check existence |
-| `ec_hm_del(m, k)` | Remove key (frees copies) |
+| `ec_hm_del(m, k)` | Remove (frees copies) |
 | `ec_hm_len(m)` | Number of entries |
 | `ec_hm_free(m)` | Free everything |
 
-### Performance notes
+### Performance
 
-- **FNV-1a 64-bit** — excellent distribution for short ASCII keys with
-  minimal instruction count (1 XOR + 1 multiply per byte).
-- **Power-of-2 capacity** — index is `hash & (cap - 1)`, which is a single
-  AND instruction (no expensive modulo).
-- **70% max load factor** — tables resize at 2x when `used * 10 >= cap * 7`,
-  keeping probe chains short (average ~1.5 probes at 70%).
-- **Tombstones** — deletion marks slots instead of shifting entries.
-- **Linear probing** — cache-friendly sequential access within a probe chain.
+- **FNV-1a 64-bit** — 1 XOR + 1 multiply per byte, excellent distribution.
+- **Power-of-2 capacity** — `hash & (cap - 1)` (single AND, no modulo).
+- **70% max load** — resize at 2×, average ~1.5 probes per lookup.
+- **Tombstones** — deletions mark slots, preserving probe chains.
+- **Linear probing** — cache-friendly sequential access.
 
 ---
 
@@ -645,17 +692,57 @@ string_free(&s);
 | `string_append_bool(s, b)` | Append "true" / "false" |
 | `string_appendf(s, fmt, ...)` | printf-style append |
 | `string_fromf(fmt, ...)` | Create string from format |
-| `string_clear(s)` | Reset to empty (keeps buffer) |
-| `string_free(s)` | Free buffer, zero struct |
 | `string_len(s)` | Current length |
+| `string_length(s)` | Alias for string_len |
 | `string_empty(s)` | True if empty |
 | `string_cstr(s)` | `const char*` (never NULL) |
+| `string_capacity(s)` | Allocated capacity |
+| `string_from(str)` | Create string from C string |
+| `string_printf(fmt, ...)` | Create string from format |
+| `string_insert(s, i, str)` | Insert at index |
+| `string_remove(s, i, n)` | Remove n chars at index |
+| `string_equals(a, b)` | True if contents match |
+| `string_contains(s, str)` | True if substring found |
+| `string_starts_with(s, str)` | True if starts with |
+| `string_ends_with(s, str)` | True if ends with |
+| `string_lowercase(s)` | Convert to lowercase |
+| `string_uppercase(s)` | Convert to uppercase |
+| `string_trim(s)` | Trim leading and trailing whitespace |
 
-### Performance notes
+### Creating strings
 
-- **Doubling realloc** — same amortized-O(1) strategy as dynamic arrays.
-- **No allocation until first append** — `string_new()` is zero-cost.
-- **`string_clear` reuses the buffer** — faster than free + new for loops.
+```c
+ec_string a = string_from("hello");            // copy of C string
+ec_string b = string_printf("v%d.%d", 2, 1);   // printf-style
+println(a.data, b.data);  // hello v2.1
+string_free(&a); string_free(&b);
+```
+
+### Inspecting and comparing
+
+```c
+ec_string s = string_from("hello world");
+string_contains(&s, "world");       // true
+string_starts_with(&s, "hello");    // true
+string_ends_with(&s, "world");      // true
+string_equals(&s, &s2);             // compare two ec_strings
+string_free(&s);
+```
+
+### Mutation in place
+
+```c
+ec_string s = string_from("  HELLO  ");
+string_trim(&s);        // "HELLO"
+string_lowercase(&s);   // "hello"
+string_uppercase(&s);   // "HELLO"
+
+string_insert(&s, 0, "say ");       // "say HELLO"
+string_remove(&s, 4, 5);            // "say "
+string_free(&s);
+```
+ 
+ ### Performance notes
 
 ---
 
@@ -696,6 +783,97 @@ int main(int argc, char **argv) {
 
 No allocations, no copies — pointers into original `argv`.
 
+
+## Logging
+
+Colored, timestamped logging macros that write to stderr. Each message is
+prefixed with a `[HH:MM:SS]` timestamp and a color-coded level label.
+
+```c
+ec_init_colors();    // call once (enables ANSI on Windows)
+
+log_info("Server starting on port", 8080);
+log_warn("Config not found, using defaults");
+log_error("Connection refused:", host);
+log_debug("Request #", req_id, "took", elapsed, "ms");
+```
+
+Output:
+
+```
+[14:32:05] INFO  Server starting on port 8080
+[14:32:06] WARN  Config not found, using defaults
+[14:32:07] ERROR Connection refused: db.example.com
+[14:32:08] DEBUG Request #42 took 15 ms
+```
+
+Colors: cyan (INFO), yellow (WARN), red (ERROR), dim/gray (DEBUG).
+
+Define `EC_NO_COLORS` before including `eacy.h` to disable ANSI codes:
+
+```c
+#define EC_NO_COLORS
+#include "eacy.h"
+```
+
+| Macro | Level | Color |
+|---|---|---|
+| `log_info(...)` | Informational | Cyan |
+| `log_warn(...)` | Warning | Yellow |
+| `log_error(...)` | Error | Red |
+| `log_debug(...)` | Debug trace | Dim |
+
+Arguments use the same type-dispatch as `print()` — no format strings.
+
+---
+
+## Stopwatch
+
+A thin wrapper around `current_time_ms()` for ad-hoc timing. Monotonic,
+wall-clock-safe, sub-millisecond precision.
+
+```c
+ec_timer t = timer_start();
+do_expensive_work();
+println("Took", (long)timer_elapsed_ms(&t), "ms");
+println("Took", timer_elapsed_seconds(&t), "s");
+
+timer_restart(&t);     // reset to now
+```
+
+| Function | What it does |
+|---|---|
+| `timer_start()` | Capture current time, return `ec_timer` |
+| `timer_restart(t)` | Reset `t` to current time |
+| `timer_elapsed_ms(t)` | Milliseconds since start/restart |
+| `timer_elapsed_seconds(t)` | Seconds since start/restart (double) |
+
+---
+
+## Benchmark
+
+Zero-fuss benchmarking macros. Wrap any block — EaCy prints the elapsed time.
+
+```c
+benchmark("qsort 1e6 ints") {
+    qsort(data, 1000000, sizeof(int), ec_cmp_int);
+}
+// → qsort 1e6 ints: 42 ms
+```
+
+Average over N runs:
+
+```c
+benchmark_avg("FFT 4096", 100) {
+    fft_4096(signal);
+}
+// → FFT 4096: 0.127 ms avg
+```
+
+| Macro | What it does |
+|---|---|
+| `benchmark(label) { ... }` | Time block once, print result |
+| `benchmark_avg(label, n) { ... }` | Time block `n` times, print average |
 ---
 
 ## Memory Debugging
@@ -864,15 +1042,15 @@ EaCy follows a two-tier naming rule:
 
 **Everyday helpers — no prefix.** These are the functions you use in every
 program: `print`, `scan`, `da_push`, `string_append`, `random_int`,
-`starts_with`, `sleep_ms`, etc.
+`starts_with`, `sleep_ms`, `log_info`, `timer_start`, `benchmark`, etc.
 
 **Advanced or infrequent features — `ec_` prefix.** These signal "this does
 something non-trivial": `ec_arena_new`, `ec_hm_set`, `ec_pool_alloc`,
 `ec_malloc`, `ec_init_colors`, `ec_args_init`.
 
 Types for advanced features also carry the `ec_` prefix (`ec_hashmap`,
-`ec_string`, `ec_arena`, `ec_pool`) even when their everyday functions
-don't (`string_append`, `string_free`).
+`ec_string`, `ec_arena`, `ec_pool`, `ec_timer`) even when their everyday
+functions don't (`string_append`, `string_free`, `timer_start`).
 
 This keeps the 95%-use-case API clean while avoiding namespace collisions
 for the specialized 5%.
@@ -886,7 +1064,7 @@ for the specialized 5%.
 | Technique | Where | Impact |
 |---|---|---|
 | `restrict` pointers | All string functions | Enables auto-vectorization |
-| `_Generic` dispatch | `print`, `scan` | Zero runtime overhead |
+| `_Generic` dispatch | `print`, `scan`, `log_*` | Zero runtime overhead |
 | `static inline` | All functions | Inlined at `-O2` |
 | Header caching | `da_push`, `da_insert`, `da_remove` | Eliminates redundant pointer arithmetic |
 | Length caching | `da_for` | `da_len()` computed once |
@@ -894,8 +1072,10 @@ for the specialized 5%.
 | Bitmask modulo | Hash map | `hash & (cap-1)` vs `%` |
 | FNV-1a hash | Hash map | 1 XOR + 1 multiply per byte |
 | Linear probing | Hash map | Cache-line-friendly |
+| Inline key/value storage | Generic hash map | One allocation, no per-entry malloc |
 | Intrusive free list | Pool allocator | O(1) alloc/free, zero overhead |
 | Bump pointer | Arena allocator | 5-10 instructions per alloc |
+| Monotonic clock | Stopwatch / Benchmark | No wall-clock jumps |
 
 ### Things to watch
 
@@ -903,8 +1083,11 @@ for the specialized 5%.
 - **`da_for` is read-only** — don't mutate length during iteration.
 - **Arena allocations are uninitialised** — use `ec_arena_alloc_zero` for zeros.
 - **Pool block size is auto-aligned** to pointer width.
-- **Hash map copies keys and values** — each `ec_hm_set` does 2 mallocs.
-- **`print`/`scan` max 8 arguments.**
+- **Generic hash map does shallow copies** — `hm_set` memcpy's keys and values.
+  For `hm(char*, V)`, the caller must keep string keys alive.
+- **Backward-compat `ec_hm_set` strdup's keys and values** — 2 mallocs per entry.
+- **`print`/`scan`/`log_*` max 8 arguments.**
+- **String keys in `hm(char*,V)` must be `char*` lvalues, not literals.**
 
 ---
 
@@ -919,4 +1102,4 @@ for the specialized 5%.
 
 ## License
 
-Public domain / CC0. Use it for anything.
+MIT License
