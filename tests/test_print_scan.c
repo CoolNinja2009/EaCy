@@ -53,6 +53,9 @@ void test_print_edge_values(void) {
     print("INT_MAX:", 2147483647);
     print("zero:", 0);
     print("neg:", -1);
+    char alphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+    print("strlen:", strlen(alphabet));
+    print("sizeof:", sizeof(alphabet));
     /* float edges */
     float zero = 0.0f, neg = -0.0f, inf = 1.0f/0.0f;
     print("float zero:", zero);

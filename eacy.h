@@ -132,6 +132,9 @@
  * these directly. */
 EC_INLINE void ec_print_int(int v)          { printf("%d", v); }
 EC_INLINE void ec_print_long(long v)        { printf("%ld", v); }
+EC_INLINE void ec_print_uint(unsigned int v) { printf("%u", v); }
+EC_INLINE void ec_print_ulong(unsigned long v) { printf("%lu", v); }
+EC_INLINE void ec_print_ullong(unsigned long long v) { printf("%llu", v); }
 EC_INLINE void ec_print_float(float v)      { printf("%g", (double)v); }
 EC_INLINE void ec_print_double(double v)    { printf("%g", v); }
 EC_INLINE void ec_print_char(char v)        { putchar(v); }
@@ -148,9 +151,10 @@ EC_INLINE void ec_print_sep(void) { putchar(' '); }
  * type of `x` at compile time. Falls back to printing a pointer for any
  * unrecognised type, which is usually the most useful thing to do.
  *
- * Supported types: int, long, float, double, char, char*, const char*,
- * bool. String literals decay to `char*`/`const char*` here exactly like
- * they would as a normal function argument.
+ * Supported types: int, long, unsigned int, unsigned long, unsigned long long,
+ * float, double, char, char*, const char*, bool. String literals decay to
+ * `char*`/`const char*` here exactly like they would as a normal function
+ * argument.
  *
  * A plain-C quirk worth knowing: character constants like 'c' and the
  * true/false macros have type `int` in C (not `char`/`bool`), so
@@ -164,6 +168,9 @@ EC_INLINE void ec_print_sep(void) { putchar(' '); }
     char:            ec_print_char,   \
     int:             ec_print_int,    \
     long:            ec_print_long,   \
+    unsigned int:    ec_print_uint,   \
+    unsigned long:   ec_print_ulong,  \
+    unsigned long long: ec_print_ullong, \
     float:           ec_print_float,  \
     double:          ec_print_double, \
     char*:           ec_print_str,    \
@@ -2447,6 +2454,9 @@ EC_INLINE size_t string_length(const ec_string *s) { return s->len; }
  * not stdout.  These mirror ec_print_* / ec_print_one. */
 EC_INLINE void ec_log_int_(int v)          { fprintf(stderr, "%d", v); }
 EC_INLINE void ec_log_long_(long v)        { fprintf(stderr, "%ld", v); }
+EC_INLINE void ec_log_uint_(unsigned int v) { fprintf(stderr, "%u", v); }
+EC_INLINE void ec_log_ulong_(unsigned long v) { fprintf(stderr, "%lu", v); }
+EC_INLINE void ec_log_ullong_(unsigned long long v) { fprintf(stderr, "%llu", v); }
 EC_INLINE void ec_log_float_(float v)      { fprintf(stderr, "%g", (double)v); }
 EC_INLINE void ec_log_double_(double v)    { fprintf(stderr, "%g", v); }
 EC_INLINE void ec_log_char_(char v)        { fputc(v, stderr); }
@@ -2461,6 +2471,9 @@ EC_INLINE void ec_log_sep_(void)           { fputc(' ', stderr); }
     char:            ec_log_char_,   \
     int:             ec_log_int_,    \
     long:            ec_log_long_,   \
+    unsigned int:    ec_log_uint_,   \
+    unsigned long:   ec_log_ulong_,  \
+    unsigned long long: ec_log_ullong_, \
     float:           ec_log_float_,  \
     double:          ec_log_double_, \
     char*:           ec_log_str_,    \

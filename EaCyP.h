@@ -214,6 +214,9 @@ EC_INLINE void ecp_print_ptr_const_(const void *v) {
     char:            ec_print_char,      \
     int:             ec_print_int,       \
     long:            ec_print_long,      \
+    unsigned int:    ec_print_uint,      \
+    unsigned long:   ec_print_ulong,     \
+    unsigned long long: ec_print_ullong, \
     float:           ec_print_float,     \
     double:          ec_print_double,    \
     char*:           ec_print_str,       \
