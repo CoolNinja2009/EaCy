@@ -2042,17 +2042,6 @@ EC_INLINE void string_appendf(ec_string *s, const char *fmt, ...) {
 }
 
 /**
- * string_fromf(fmt, ...) — creates a new ec_string from a printf-style
- * format.  Useful for one-shot formatted strings.
- *
- * HEAP ALLOCATION: the returned string must be freed with string_free().
- *
- * Example:
- *     ec_string msg = string_fromf("Page %d of %d", 3, 10);
- *     println(msg.data);
- *     string_free(&msg);
- */
-/**
  * string_fromf(fmt, ...) — alias for string_printf().  Provided for
  * backward compatibility and as a more descriptive name for one-shot
  * formatted string creation.
