@@ -1,5 +1,5 @@
 @echo off
-REM build.cmd — compile all EaCy stress tests (Windows / MSVC or GCC)
+REM build.cmd - compile all EaCy stress tests (Windows / MSVC or GCC)
 REM Usage: build          (uses gcc by default)
 REM        build msvc     (uses cl.exe)
 REM        build clean    (remove .exe files)
@@ -35,6 +35,8 @@ for %%f in (
     test_pool
     test_time_stopwatch
     test_random_files
+    test_command_runner
+    test_eacyp
     test_logging_benchmark
     test_cli
     test_stress

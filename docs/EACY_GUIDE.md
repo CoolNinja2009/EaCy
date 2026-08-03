@@ -1,11 +1,11 @@
-# EaCy — The C Library That Feels Like a Scripting Language
+# EaCy - The C Library That Feels Like a Scripting Language
 
 **One header. Zero dependencies. Compiles on GCC, Clang, and MSVC.**
 
 Drop `eacy.h` next to your `.c` file and `#include "eacy.h"`. No build system,
 no linking, no package manager.
 
-EaCy is designed for **speed** — most functions compile down to a handful of
+EaCy is designed for **speed** - most functions compile down to a handful of
 instructions, macros cache repeated lookups, and hot paths are kept
 branch-free where possible.
 
@@ -20,22 +20,25 @@ branch-free where possible.
 6. [Strings](#strings)
 7. [Random Numbers](#random-numbers)
 8. [Files](#files)
-9. [Time](#time)
-10. [Colors](#colors)
-11. [Assertions](#assertions)
-12. [Dynamic Arrays](#dynamic-arrays)
-13. [Hash Map](#hash-map)
-14. [Arena Allocator](#arena-allocator)
-15. [Pool Allocator](#pool-allocator)
-16. [String Builder](#string-builder)
-17. [CLI Arguments](#cli-arguments)
-18. [Logging](#logging)
-19. [Stopwatch](#stopwatch)
-20. [Benchmark](#benchmark)
-21. [Memory Debugging](#memory-debugging)
-22. [Complete Programs](#complete-programs)
-23. [Naming Conventions](#naming-conventions)
-24. [Performance Notes](#performance-notes)
+9. [Command Runner](#command-runner)
+10. [Time](#time)
+11. [Colors](#colors)
+12. [Assertions](#assertions)
+13. [Dynamic Arrays](#dynamic-arrays)
+14. [Hash Map](#hash-map)
+15. [Arena Allocator](#arena-allocator)
+16. [Pool Allocator](#pool-allocator)
+17. [String Builder](#string-builder)
+18. [CLI Arguments](#cli-arguments)
+19. [Logging](#logging)
+20. [Stopwatch](#stopwatch)
+21. [Benchmark](#benchmark)
+22. [Memory Debugging](#memory-debugging)
+23. [EaCyP Dynamic Values](#eacyp-dynamic-values)
+24. [EaCyP Simple Modules](#eacyp-simple-modules)
+25. [Complete Programs](#complete-programs)
+26. [Naming Conventions](#naming-conventions)
+27. [Performance Notes](#performance-notes)
 ---
 
 ## Quick Start
@@ -60,7 +63,7 @@ The answer is 42
 
 ## Printing
 
-No format strings. Pass values — EaCy picks the right printer at compile time
+No format strings. Pass values - EaCy picks the right printer at compile time
 via `_Generic`.
 
 ```c
@@ -88,7 +91,7 @@ bool b = true;
 println(c, b);  // c true
 ```
 
-`print(...)` and `println(...)` are identical — both end with a newline.
+`print(...)` and `println(...)` are identical - both end with a newline.
 Use `nl()` for a blank line.
 
 ---
@@ -137,24 +140,24 @@ char   c = input_char();     // first non-whitespace char
 
 ## Loops
 
-### `repeat(n)` — do something N times
+### `repeat(n)` - do something N times
 
 ```c
 repeat(5) println("Hi!");   // prints 5 times
 ```
 
-Nestable — each gets its own counter via `__LINE__` token pasting.
+Nestable - each gets its own counter via `__LINE__` token pasting.
 
-### `foreach(i, arr)` — iterate a static array
+### `foreach(i, arr)` - iterate a static array
 
 ```c
 int nums[] = {10, 20, 30, 40, 50};
 foreach(i, nums) println(nums[i]);
 ```
 
-Uses `sizeof` — works on real arrays only, not decayed pointers.
+Uses `sizeof` - works on real arrays only, not decayed pointers.
 
-### `for_range(i, start, end)` — numeric range
+### `for_range(i, start, end)` - numeric range
 
 ```c
 for_range(i, 0, 5) println((long)i);  // 0 1 2 3 4
@@ -174,10 +177,10 @@ println("clamp:", clamp(12, 0, 10)); // 10
 println("lerp:",  lerp(0.0f, 100.0f, 0.5f));  // 50.0
 
 int x = 1, y = 2;
-swap(x, y, int);   // x=2, y=1  (explicit type required — C11 has no typeof)
+swap(x, y, int);   // x=2, y=1  (explicit type required - C11 has no typeof)
 ```
 
-All are macros — avoid side-effecting arguments (`min(x++, y)` calls `x++` twice).
+All are macros - avoid side-effecting arguments (`min(x++, y)` calls `x++` twice).
 
 ---
 
@@ -192,7 +195,7 @@ contains(s, "lo");        // true
 equals(s, "hello.txt");   // true
 ```
 
-All string functions take `const char *restrict` — the compiler can
+All string functions take `const char *restrict` - the compiler can
 auto-vectorize comparisons on large strings.
 
 ### Mutating functions (in-place)
@@ -205,7 +208,7 @@ uppercase(buf);            // "HELLO WORLD"
 ```
 
 `trim()` modifies the buffer in place and returns a pointer into it.
-Do **not** `free()` the returned pointer — free the original buffer.
+Do **not** `free()` the returned pointer - free the original buffer.
 
 ---
 
@@ -218,14 +221,14 @@ float rf = random_float(0, 100);    // 0.0..100.0
 ```
 
 Skip `random_seed()` for reproducible runs (useful in tests). Uses `rand()`
-internally — not crypto-grade, but fine for games and demos.
+internally - not crypto-grade, but fine for games and demos.
 
 ---
 
 ## Files
 
 ```c
-// Read entire file (allocates — you must free)
+// Read entire file (allocates - you must free)
 char *text = read_text_file("data.txt");
 if (text) {
     println(text);
@@ -239,6 +242,34 @@ append_text_file("out.txt", "More text\n");
 
 ---
 
+## Command Runner
+
+Run shell commands and optionally capture stdout.
+
+```c
+int code = cmd_run("gcc main.c -o main");
+if (code == 0) println("Build OK");
+
+if (cmd_ok("git diff --check")) {
+    println("No whitespace errors");
+}
+
+char *out = cmd_capture("git status --short");
+if (out) {
+    println(out);
+    free(out);
+}
+```
+
+`cmd_run()` returns the command's exit code, or `-1` if the shell could not be
+started. `cmd_capture()` allocates a string for stdout only; the caller owns it
+and must `free()` it.
+
+Commands are executed through the host shell, so never pass untrusted user input
+without validating or escaping it first.
+
+---
+
 ## Time
 
 ```c
@@ -248,7 +279,7 @@ println("Elapsed:", (long)(current_time_ms() - start));
 ```
 
 `current_time_ms()` is monotonic (won't jump if the system clock changes).
-The absolute value is meaningless — only differences matter.
+The absolute value is meaningless - only differences matter.
 
 ---
 
@@ -334,7 +365,7 @@ da_push_many(nums, more, 5);   // single capacity check + memcpy
 ```
 
 Use `da_push_many` instead of a `da_push` loop when you have a C array ready.
-This is **much** faster — one `memcpy` vs N individual element writes.
+This is **much** faster - one `memcpy` vs N individual element writes.
 
 ### Sort, copy, resize
 
@@ -348,7 +379,7 @@ da_push(vals, 2);
 da_sort(vals, ec_cmp_int);         // 1, 2, 3
 da_sort(vals, ec_cmp_int_desc);    // 3, 2, 1
 
-// Deep copy — independent clone
+// Deep copy - independent clone
 int *clone = da_copy(vals, int);
 
 // Resize: grow (zero-fill) or shrink (truncate)
@@ -371,7 +402,7 @@ for_range(i, 0, 100) {
     da_push(names, strdup(buf));
 }
 
-da_clear(names);            // len=0, capacity stays — reuse buffer
+da_clear(names);            // len=0, capacity stays - reuse buffer
 da_free(names);
 ```
 
@@ -391,7 +422,7 @@ da_free(names);
 | `da_insert(arr, i, item)` | Insert at index |
 | `da_remove(arr, i)` | Remove at index |
 | `da_resize(arr, n)` | Resize (zero-fill on grow, truncate on shrink) |
-| `da_copy(arr, type)` | Deep copy — free with `da_free` |
+| `da_copy(arr, type)` | Deep copy - free with `da_free` |
 | `da_sort(arr, cmp)` | Sort in place (use `ec_cmp_*` comparators) |
 | `da_clear(arr)` | Reset length (keep capacity) |
 | `da_reserve(arr, n)` | Pre-allocate for n elements |
@@ -413,7 +444,7 @@ Write your own comparator with the standard `qsort` signature:
 
 ### Performance notes
 
-- `da_for` caches `da_len(arr)` into a local variable — the length check
+- `da_for` caches `da_len(arr)` into a local variable - the length check
   isn't re-evaluated every iteration.
 - `da_push` and `da_insert` cache the header pointer after the grow check,
   eliminating redundant pointer arithmetic on the store path.
@@ -431,12 +462,12 @@ Keys and values are stored inline (shallow copy), so the map owns its data.
 
 ### Declaring a map
 
-Use `hm(KeyType, ValueType)` — it expands to the internal `ec_hashmap` type.
+Use `hm(KeyType, ValueType)` - it expands to the internal `ec_hashmap` type.
 
 ```c
-hm(int, int)    scores;    // int → int
-hm(char*, float) prices;   // string → float
-hm(MyKey, MyVal) custom;   // custom struct → struct
+hm(int, int)    scores;    // int -> int
+hm(char*, float) prices;   // string -> float
+hm(MyKey, MyVal) custom;   // custom struct -> struct
 ```
 
 ### Basic usage
@@ -451,7 +482,7 @@ hm_set(scores, 99, 300);
 assert(hm_size(scores) == 3);
 
 int val;
-if (hm_get(scores, 42, &val))          // found → copies into val
+if (hm_get(scores, 42, &val))          // found -> copies into val
     println("Score:", val);            // Score: 100
 
 if (hm_contains(scores, 99))
@@ -466,16 +497,16 @@ hm_free(scores);                       // free everything
 ### String keys
 
 When key type is `char*`, comparison and hashing use the string *content*
-(strcmp / FNV-1a), not the pointer address. Keys MUST be `char*` lvalues —
+(strcmp / FNV-1a), not the pointer address. Keys MUST be `char*` lvalues -
 pass a variable, not a string literal directly:
 
 ```c
 hm(char*, float) prices;
 hm_init(prices);
 
-const char *apple  = "apple";          // lvalue — correct
+const char *apple  = "apple";          // lvalue - correct
 hm_set(prices, apple, 1.29f);
-// hm_set(prices, "apple", 1.29f);     // WRONG — literal treated as array
+// hm_set(prices, "apple", 1.29f);     // WRONG - literal treated as array
 
 float price;
 if (hm_get(prices, apple, &price))
@@ -493,7 +524,7 @@ hm_clear(scores);                      // keep buffer, reset count
 hm_set(scores, 1, 10);                 // reuse existing memory
 ```
 
-### Backward-compatible string→string API
+### Backward-compatible string->string API
 
 The original `ec_hm_*` functions still work:
 
@@ -507,14 +538,14 @@ ec_hm_free(&m);
 
 Use this when you need the map to own string copies (free'd on remove/free).
 
-### Reference — generic API
+### Reference - generic API
 
 | Macro | What it does |
 |---|---|
 | `hm(K,V)` | Declare variable of type `ec_hashmap` |
 | `hm_init(m)` | Zero-initialise (no allocation) |
 | `hm_set(m, k, v)` | Insert or update (shallow copy) |
-| `hm_get(m, k, v)` | Look up — copies value into `*v`, returns bool |
+| `hm_get(m, k, v)` | Look up - copies value into `*v`, returns bool |
 | `hm_contains(m, k)` | `true` if key exists |
 | `hm_remove(m, k)` | Remove key (returns `true` if present) |
 | `hm_clear(m)` | Remove all entries (keeps buffer) |
@@ -522,11 +553,11 @@ Use this when you need the map to own string copies (free'd on remove/free).
 | `hm_size(m)` | Number of entries |
 | `hm_empty(m)` | `true` if empty |
 
-### Reference — backward-compatible API
+### Reference - backward-compatible API
 
 | Function | What it does |
 |---|---|
-| `ec_hm_new()` | Create string→string map |
+| `ec_hm_new()` | Create string->string map |
 | `ec_hm_set(m, k, v)` | Insert (strdup's k and v) |
 | `ec_hm_get(m, k)` | Get value or NULL |
 | `ec_hm_has(m, k)` | Check existence |
@@ -536,11 +567,11 @@ Use this when you need the map to own string copies (free'd on remove/free).
 
 ### Performance
 
-- **FNV-1a 64-bit** — 1 XOR + 1 multiply per byte, excellent distribution.
-- **Power-of-2 capacity** — `hash & (cap - 1)` (single AND, no modulo).
-- **70% max load** — resize at 2×, average ~1.5 probes per lookup.
-- **Tombstones** — deletions mark slots, preserving probe chains.
-- **Linear probing** — cache-friendly sequential access.
+- **FNV-1a 64-bit** - 1 XOR + 1 multiply per byte, excellent distribution.
+- **Power-of-2 capacity** - `hash & (cap - 1)` (single AND, no modulo).
+- **70% max load** - resize at 2x, average ~1.5 probes per lookup.
+- **Tombstones** - deletions mark slots, preserving probe chains.
+- **Linear probing** - cache-friendly sequential access.
 
 ---
 
@@ -568,7 +599,7 @@ ec_arena arena = ec_arena_new(10 * 1024 * 1024);
 repeat(frame, 60) {
     Vec3 *positions = ec_arena_alloc(&arena, 10000 * sizeof(Vec3));
     simulate_frame(positions);
-    ec_arena_reset(&arena);   // rewind — reuse same memory
+    ec_arena_reset(&arena);   // rewind - reuse same memory
 }
 
 ec_arena_free(&arena);
@@ -631,7 +662,7 @@ ec_pool_destroy(&pool);
 
 A growable string buffer. Build strings incrementally without buffer-size
 arithmetic, manual `realloc`, or `snprintf` gymnastics. The buffer is always
-null-terminated — `.data` is always a valid C string.
+null-terminated - `.data` is always a valid C string.
 
 ### Basic usage
 
@@ -640,8 +671,8 @@ ec_string s = string_new();
 
 string_append(&s, "Hello, ");
 string_append(&s, name);
-string_appendf(&s, " — you are visitor #%d", count);
-println(s.data);          // "Hello, Alice — you are visitor #42"
+string_appendf(&s, " - you are visitor #%d", count);
+println(s.data);          // "Hello, Alice - you are visitor #42"
 
 string_free(&s);
 ```
@@ -748,7 +779,7 @@ string_free(&s);
 
 ## CLI Arguments
 
-No-dependency `argc`/`argv` parser. State is held in a struct — no hidden
+No-dependency `argc`/`argv` parser. State is held in a struct - no hidden
 globals, safe to pass across translation units.
 
 ```c
@@ -782,7 +813,7 @@ int main(int argc, char **argv) {
 | `ec_args_pos_count(&args)` | Total argument count excluding argv[0] |
 | `ec_args_count(&args)` | Raw `argc` |
 
-No allocations, no copies — pointers into original `argv`.
+No allocations, no copies - pointers into original `argv`.
 
 ## Logging
 
@@ -823,7 +854,7 @@ Define `EC_NO_COLORS` before including `eacy.h` to disable ANSI codes:
 | `log_error(...)` | Error | Red |
 | `log_debug(...)` | Debug trace | Dim |
 
-Arguments use the same type-dispatch as `print()` — no format strings.
+Arguments use the same type-dispatch as `print()` - no format strings.
 
 ---
 
@@ -852,13 +883,13 @@ timer_restart(&t);     // reset to now
 
 ## Benchmark
 
-Zero-fuss benchmarking macros. Wrap any block — EaCy prints the elapsed time.
+Zero-fuss benchmarking macros. Wrap any block - EaCy prints the elapsed time.
 
 ```c
 benchmark("qsort 1e6 ints") {
     qsort(data, 1000000, sizeof(int), ec_cmp_int);
 }
-// → qsort 1e6 ints: 42 ms
+// -> qsort 1e6 ints: 42 ms
 ```
 
 Average over N runs:
@@ -867,7 +898,7 @@ Average over N runs:
 benchmark_avg("FFT 4096", 100) {
     fft_4096(signal);
 }
-// → FFT 4096: 0.127 ms avg
+// -> FFT 4096: 0.127 ms avg
 ```
 
 | Macro | What it does |
@@ -896,8 +927,116 @@ int main(void) {
 }
 ```
 
-Define **before** the `#include`. This counts blocks, not bytes — a sanity
+Define **before** the `#include`. This counts blocks, not bytes - a sanity
 check, not a full leak detector.
+
+---
+
+## EaCyP Dynamic Values
+
+`EaCyP.h` is an optional layer for small programs, demos, and experiments that
+want dynamic values while staying in plain C11.
+
+```c
+#include "EaCyP.h"
+
+int main(void) {
+    var a, b, c;
+    a = b = c = V(12);
+
+    let(name, "EaCyP");
+    set(a, 99);
+    set_all(V(true), &b, &c);
+
+    say("name:", name, "a:", a);
+    println(type_of(name));       // string
+    println((long)num(a));        // 99
+    return 0;
+}
+```
+
+`var` is a tagged value type. `V(...)` boxes common C values into a `var`:
+`bool`, `char`, `int`, `long`, `float`, `double`, `char*`, and `const char*`.
+
+| Helper | What it does |
+|---|---|
+| `var` | Dynamic value type |
+| `V(x)` | Box a C value |
+| `none` | Null dynamic value |
+| `let(name, value)` | Declare and initialize a dynamic variable |
+| `set(name, value)` | Assign a boxed value |
+| `set_all(value, &a, &b, ...)` | Assign one dynamic value to several vars |
+| `say(...)` | Print mixed normal and dynamic values |
+| `type_of(v)` | Return `"int"`, `"string"`, `"null"`, etc |
+| `num(v)` / `integer(v)` | Convert dynamic values to numbers |
+| `truthy(v)` | Python-like truthiness |
+| `add/sub/mul/divv` | Simple numeric operations on dynamic values |
+
+Plain C cannot change its parser, so exact Python grammar is not possible in a
+header. The dynamic chained form is:
+
+```c
+var a, b, c;
+a = b = c = V(12);
+```
+
+For normal typed C variables, the original C syntax still works:
+
+```c
+int a, b, c;
+a = b = c = 12;
+```
+
+---
+
+## EaCyP Simple Modules
+
+EaCyP includes tiny module markers for header-only code. They are not a new C
+compiler feature; they are readable macros for organizing single-file modules
+without repeating guard/declaration boilerplate.
+
+```c
+#include "EaCyP.h"
+
+module(math);
+
+export int add(int a, int b) {
+    return a + b;
+}
+
+private int clamp_zero(int x) {
+    return x < 0 ? 0 : x;
+}
+
+int main(void) {
+    say("module:", module_name(math));
+    say("sum:", add(10, 2));
+    return 0;
+}
+```
+
+| Helper | What it does |
+|---|---|
+| `module(name);` | Declares a tiny module marker and name helper |
+| `module_name(name)` | Returns the module name as a string |
+| `export` | Marks a header-only public function (`static inline`) |
+| `private` | Marks an internal helper (`static`) |
+
+Plain C cannot parse bare `module math;` as a macro, so the valid C11 form is:
+
+```c
+module(math);
+export int add(int a, int b) { return a + b; }
+```
+
+This gives the feel of:
+
+```c
+module math;
+export int add(int, int);
+```
+
+while still compiling as normal C.
 
 ---
 
@@ -1040,11 +1179,11 @@ int main(int argc, char **argv) {
 
 EaCy follows a two-tier naming rule:
 
-**Everyday helpers — no prefix.** These are the functions you use in every
+**Everyday helpers - no prefix.** These are the functions you use in every
 program: `print`, `scan`, `da_push`, `string_append`, `random_int`,
 `starts_with`, `sleep_ms`, `log_info`, `timer_start`, `benchmark`, etc.
 
-**Advanced or infrequent features — `ec_` prefix.** These signal "this does
+**Advanced or infrequent features - `ec_` prefix.** These signal "this does
 something non-trivial": `ec_arena_new`, `ec_hm_set`, `ec_pool_alloc`,
 `ec_malloc`, `ec_init_colors`, `ec_args_new`.
 
@@ -1079,13 +1218,13 @@ for the specialized 5%.
 
 ### Things to watch
 
-- **Dynamic array macros** evaluate `arr` multiple times — use named variables.
-- **`da_for` is read-only** — don't mutate length during iteration.
-- **Arena allocations are uninitialised** — use `ec_arena_alloc_zero` for zeros.
+- **Dynamic array macros** evaluate `arr` multiple times - use named variables.
+- **`da_for` is read-only** - don't mutate length during iteration.
+- **Arena allocations are uninitialised** - use `ec_arena_alloc_zero` for zeros.
 - **Pool block size is auto-aligned** to pointer width.
-- **Generic hash map does shallow copies** — `hm_set` memcpy's keys and values.
+- **Generic hash map does shallow copies** - `hm_set` memcpy's keys and values.
   For `hm(char*, V)`, the caller must keep string keys alive.
-- **Backward-compat `ec_hm_set` strdup's keys and values** — 2 mallocs per entry.
+- **Backward-compat `ec_hm_set` strdup's keys and values** - 2 mallocs per entry.
 - **`print`/`scan`/`log_*` max 8 arguments.**
 - **String keys in `hm(char*,V)` must be `char*` lvalues, not literals.**
 
@@ -1094,7 +1233,7 @@ for the specialized 5%.
 ## Platform & Compiler Support
 
 - **C11** or later (`_Generic` is a hard requirement)
-- **GCC**, **Clang**, **MSVC** — CI-tested on all three
+- **GCC**, **Clang**, **MSVC** - CI-tested on all three
 - **Windows**, **Linux**, **macOS**
 - Also compiles as **C++** (wrapped in `extern "C"`)
 

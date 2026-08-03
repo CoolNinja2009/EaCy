@@ -21,9 +21,9 @@
  *      repeat(), foreach(), min()/max()/clamp(), etc). Everything else is
  *      a plain function so it behaves predictably and is easy to step
  *      through in a debugger.
- *    - EaCy never allocates memory on the heap behind your back. The only
- *      functions that allocate are `read_text_file()` and the `ec_*`
- *      memory helpers, and both are documented as doing so.
+ *    - EaCy never allocates memory on the heap behind your back. Functions
+ *      that allocate, such as `read_text_file()`, `cmd_capture()`, and the
+ *      `ec_*` memory helpers, document caller ownership.
  *
  *  License: public domain / CC0. Do whatever you want with it.
  * ============================================================================
@@ -70,6 +70,7 @@
 #else
     #include <unistd.h>
     #include <sys/time.h>
+    #include <sys/wait.h>
 #endif
 
 /* MSVC does not define `inline` for plain C the same way GCC/Clang do in
@@ -602,6 +603,90 @@ EC_INLINE bool append_text_file(const char *path, const char *content) {
     size_t written = fwrite(content, 1, len, f);
     fclose(f);
     return written == len;
+}
+
+/* ===========================================================================
+ * Section 7b: Command runner
+ * ========================================================================= */
+
+#if defined(EC_PLATFORM_WINDOWS)
+    #define EC_POPEN_  _popen
+    #define EC_PCLOSE_ _pclose
+#else
+    #define EC_POPEN_  popen
+    #define EC_PCLOSE_ pclose
+#endif
+
+/**
+ * cmd_run(command) - runs `command` through the host shell and returns its
+ * exit code. Returns -1 if the shell could not be started.
+ *
+ * Example:
+ *     int code = cmd_run("gcc main.c -o main");
+ *     if (code == 0) println("build ok");
+ */
+EC_INLINE int cmd_run(const char *command) {
+    if (!command) return -1;
+    int status = system(command);
+    if (status == -1) return -1;
+#if defined(EC_PLATFORM_POSIX)
+    if (WIFEXITED(status)) return WEXITSTATUS(status);
+    return status;
+#else
+    return status;
+#endif
+}
+
+/**
+ * cmd_ok(command) - convenience wrapper around cmd_run().
+ */
+EC_INLINE bool cmd_ok(const char *command) {
+    return cmd_run(command) == 0;
+}
+
+/**
+ * cmd_capture(command) - runs `command` and captures stdout into a newly
+ * allocated, null-terminated string. Returns NULL if the command could not be
+ * started or memory allocation fails.
+ *
+ * HEAP ALLOCATION: the caller owns the returned pointer and must free() it.
+ */
+EC_INLINE char *cmd_capture(const char *command) {
+    if (!command) return NULL;
+
+    FILE *pipe = EC_POPEN_(command, "r");
+    if (!pipe) return NULL;
+
+    size_t len = 0;
+    size_t cap = 256;
+    char *out = (char *)malloc(cap);
+    if (!out) {
+        EC_PCLOSE_(pipe);
+        return NULL;
+    }
+    out[0] = '\0';
+
+    char chunk[256];
+    while (fgets(chunk, sizeof(chunk), pipe)) {
+        size_t n = strlen(chunk);
+        if (len + n + 1 > cap) {
+            size_t new_cap = cap;
+            while (len + n + 1 > new_cap) new_cap *= 2;
+            char *grown = (char *)realloc(out, new_cap);
+            if (!grown) {
+                free(out);
+                EC_PCLOSE_(pipe);
+                return NULL;
+            }
+            out = grown;
+            cap = new_cap;
+        }
+        memcpy(out + len, chunk, n + 1);
+        len += n;
+    }
+
+    EC_PCLOSE_(pipe);
+    return out;
 }
 
 /* ===========================================================================
